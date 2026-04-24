@@ -6,7 +6,7 @@ use std::time::Duration;
 use chrono::{DateTime, Local, NaiveTime, TimeZone};
 use thiserror::Error;
 
-use crate::backup::BackupJob;
+use crate::backup::{BackupJob, JobSummary};
 use crate::config::{Config, ConfigStore};
 use crate::drive_waiter::wait_for_destination;
 use crate::logger::Logger;
@@ -23,12 +23,22 @@ pub enum SchedulerCommand {
     Shutdown,
 }
 
-pub struct SchedulerHandle {
-    tx: mpsc::Sender<SchedulerCommand>,
-    join: Option<thread::JoinHandle<()>>,
+pub trait JobReporter: Send + Sync + 'static {
+    fn job_started(&self) {}
+    fn job_finished(&self, _summary: JobSummary) {}
+    fn job_errored(&self, _message: String) {}
+    fn status_changed(&self) {}
 }
 
-impl SchedulerHandle {
+pub struct NoopReporter;
+impl JobReporter for NoopReporter {}
+
+#[derive(Clone)]
+pub struct SchedulerSender {
+    tx: mpsc::Sender<SchedulerCommand>,
+}
+
+impl SchedulerSender {
     pub fn run_now(&self) -> Result<(), mpsc::SendError<SchedulerCommand>> {
         self.tx.send(SchedulerCommand::RunNow)
     }
@@ -37,8 +47,23 @@ impl SchedulerHandle {
         self.tx.send(SchedulerCommand::ReloadConfig)
     }
 
+    pub fn shutdown(&self) -> Result<(), mpsc::SendError<SchedulerCommand>> {
+        self.tx.send(SchedulerCommand::Shutdown)
+    }
+}
+
+pub struct SchedulerHandle {
+    sender: SchedulerSender,
+    join: Option<thread::JoinHandle<()>>,
+}
+
+impl SchedulerHandle {
+    pub fn sender(&self) -> SchedulerSender {
+        self.sender.clone()
+    }
+
     pub fn shutdown(mut self) {
-        let _ = self.tx.send(SchedulerCommand::Shutdown);
+        let _ = self.sender.shutdown();
         if let Some(h) = self.join.take() {
             let _ = h.join();
         }
@@ -89,11 +114,15 @@ pub fn should_catch_up(
     }
 }
 
-pub fn start(store: Arc<ConfigStore>, logger: Arc<Logger>) -> SchedulerHandle {
+pub fn start(
+    store: Arc<ConfigStore>,
+    logger: Arc<Logger>,
+    reporter: Arc<dyn JobReporter>,
+) -> SchedulerHandle {
     let (tx, rx) = mpsc::channel();
-    let join = thread::spawn(move || run_loop(store, logger, rx));
+    let join = thread::spawn(move || run_loop(store, logger, reporter, rx));
     SchedulerHandle {
-        tx,
+        sender: SchedulerSender { tx },
         join: Some(join),
     }
 }
@@ -101,13 +130,14 @@ pub fn start(store: Arc<ConfigStore>, logger: Arc<Logger>) -> SchedulerHandle {
 fn run_loop(
     store: Arc<ConfigStore>,
     logger: Arc<Logger>,
+    reporter: Arc<dyn JobReporter>,
     rx: mpsc::Receiver<SchedulerCommand>,
 ) {
     if let Ok(cfg) = store.load() {
         if let Ok(sched) = parse_schedule(&cfg.schedule_time) {
             if should_catch_up(Local::now(), sched, cfg.last_run_at) {
                 logger.info("Catching up on a missed scheduled run");
-                run_job(&store, &logger, &cfg);
+                run_job(&store, &logger, reporter.as_ref(), &cfg);
             }
         }
     }
@@ -137,29 +167,34 @@ fn run_loop(
             }
         };
 
+        reporter.status_changed();
+
         match rx.recv_timeout(wait) {
             Ok(SchedulerCommand::RunNow) => {
                 logger.info("Manual backup triggered");
-                run_job(&store, &logger, &cfg);
+                run_job(&store, &logger, reporter.as_ref(), &cfg);
             }
             Ok(SchedulerCommand::ReloadConfig) => continue,
             Ok(SchedulerCommand::Shutdown) => return,
             Err(RecvTimeoutError::Timeout) => {
-                run_job(&store, &logger, &cfg);
+                run_job(&store, &logger, reporter.as_ref(), &cfg);
             }
             Err(RecvTimeoutError::Disconnected) => return,
         }
     }
 }
 
-fn run_job(store: &ConfigStore, logger: &Logger, cfg: &Config) {
+fn run_job(store: &ConfigStore, logger: &Logger, reporter: &dyn JobReporter, cfg: &Config) {
     let (src, dest) = match (cfg.source.as_ref(), cfg.destination.as_ref()) {
         (Some(s), Some(d)) => (s.clone(), d.clone()),
         _ => {
             logger.warn("Backup skipped: source or destination not configured");
+            reporter.job_errored("Source or destination not configured".to_string());
             return;
         }
     };
+
+    reporter.job_started();
 
     logger.info(&format!(
         "Backup starting: {} -> {}",
@@ -168,7 +203,9 @@ fn run_job(store: &ConfigStore, logger: &Logger, cfg: &Config) {
     ));
 
     if let Err(err) = wait_for_destination(&dest) {
-        logger.error(&format!("Destination not ready: {err}"));
+        let msg = format!("Destination not ready: {err}");
+        logger.error(&msg);
+        reporter.job_errored(msg);
         return;
     }
 
@@ -191,9 +228,12 @@ fn run_job(store: &ConfigStore, logger: &Logger, cfg: &Config) {
                     logger.error(&format!("Failed to persist run summary: {err}"));
                 }
             }
+            reporter.job_finished(outcome.summary);
         }
         Err(err) => {
-            logger.error(&format!("Backup failed: {err}"));
+            let msg = format!("Backup failed: {err}");
+            logger.error(&msg);
+            reporter.job_errored(msg);
         }
     }
 }
