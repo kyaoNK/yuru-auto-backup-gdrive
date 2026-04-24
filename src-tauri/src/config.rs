@@ -5,6 +5,8 @@ use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::backup::JobSummary;
+
 const DEFAULT_SCHEDULE_TIME: &str = "09:00";
 
 #[derive(Debug, Error)]
@@ -46,13 +48,6 @@ pub struct Config {
     pub last_run_at: Option<DateTime<Local>>,
     #[serde(default)]
     pub last_summary: Option<JobSummary>,
-}
-
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct JobSummary {
-    pub copied: u32,
-    pub errors: u32,
 }
 
 impl Default for Config {
@@ -147,15 +142,17 @@ mod tests {
     #[test]
     fn save_then_load_roundtrip() {
         let (_tmp, store) = store_in_tmp();
-        let mut cfg = Config::default();
-        cfg.source = Some(PathBuf::from("F:/src"));
-        cfg.destination = Some(PathBuf::from("G:/dest"));
-        cfg.schedule_time = "14:30".into();
-        cfg.auto_start = false;
-        cfg.last_summary = Some(JobSummary {
-            copied: 3,
-            errors: 1,
-        });
+        let cfg = Config {
+            source: Some(PathBuf::from("F:/src")),
+            destination: Some(PathBuf::from("G:/dest")),
+            schedule_time: "14:30".into(),
+            auto_start: false,
+            last_summary: Some(JobSummary {
+                copied: 3,
+                errors: 1,
+            }),
+            ..Config::default()
+        };
 
         store.save(&cfg).unwrap();
         let loaded = store.load().unwrap();

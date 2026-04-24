@@ -1,5 +1,9 @@
 pub mod app_dir;
+pub mod backup;
 pub mod config;
+pub mod drive_waiter;
+pub mod logger;
+pub mod scheduler;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {

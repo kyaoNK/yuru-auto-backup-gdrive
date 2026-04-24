@@ -5283,6 +5283,7 @@ name = "yuru-auto-backup-gdrive"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "regex",
  "serde",
  "serde_json",
  "tauri",
@@ -5290,6 +5291,8 @@ dependencies = [
  "tauri-plugin-opener",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "walkdir",
 ]
 
 [[package]]
