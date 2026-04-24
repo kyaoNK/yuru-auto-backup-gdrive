@@ -4,8 +4,12 @@ node_modules/
 # Build artifacts
 /dist/
 /build/
+/package/
+/.svelte-kit/
 /src-tauri/target/
 /src-tauri/gen/
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
 
 # Logs & env
 *.log
