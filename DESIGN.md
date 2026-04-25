@@ -33,7 +33,11 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 
 ### 4.2 除外条件
 
-- パスに `Auto-Save` を含むもの（Premiere Pro 自動保存）を常に除外
+- パスに `Auto-Save` を含むもの（Premiere Pro 自動保存）を常に除外（ハードコード）
+- 加えて、以下の**ユーザー設定による追加除外**を適用する（どちらも空でも可）:
+  - `excludedFolders`: 絶対パスのリスト。ファイルの祖先パスのいずれかがこのリストのいずれかと一致すれば除外（= そのフォルダ配下のサブツリーを丸ごと除外）
+  - `excludedFolderNames`: フォルダ名のリスト。ファイルの祖先フォルダ名のいずれかがこのリストのいずれか（大文字小文字を区別しない）と一致すれば除外（例: `Proxy`, `Cache`）
+- 上記のいずれか 1 つにでも該当したファイルは対象外。ハードコードされた `Auto-Save` 除外と `^\d{6}\(` 必須条件は**そのまま固定**で、これらと独立・追加で適用される。
 
 ### 4.3 出力先・命名規則
 
@@ -191,12 +195,14 @@ fn run(cfg: &Config) -> JobSummary {
   "destination": "H:/共有ドライブ/.../バックアップ",
   "scheduleTime": "09:00",
   "autoStart": true,
+  "excludedFolders": ["F:/pedantic制作/250304(3)_クイズ/Proxy"],
+  "excludedFolderNames": ["Cache", "Render"],
   "lastRunAt": "2026-04-23T09:00:12+09:00",
   "lastSummary": { "copied": 3, "errors": 0 }
 }
 ```
 
-6 項目のみ。ユーザーが意味のある選択肢を持つものだけを設定として持ち、挙動を規定するパラメータは 8.3 の定数で固定する。
+8 項目。ハードコードされた `Auto-Save` 除外と `^\d{6}\(` 必須は 8.3 の定数で維持しつつ、ユーザーが現場の運用で追加したい除外（例: `Proxy` / `Cache` / `Render`）はここで持つ。挙動を規定する他のパラメータ（対象拡張子・Drive 待機秒数・`_Latest.prproj` サフィックス）は 8.3 の定数のまま変更不可。
 
 ### 8.7 Logger
 - `<AppDir>/logs/backup.log` へ追記。1 日 1 ジョブなのでローテーションは行わず単一ファイル（必要に応じて手動削除）。
@@ -344,7 +350,7 @@ yuru-auto-backup-gdrive/
 | `$DEST` | `config.destination`（UI で選択、Drive 自動検出あり） |
 | `while (!(Test-Path $DEST) ...)` | `DriveWaiter`（`DRIVE_WAIT_SECONDS=300` で固定） |
 | `Get-ChildItem -Filter *.prproj -Recurse` | `walkdir` + `TARGET_EXTENSION="prproj"` |
-| `$_.FullName -notmatch "Auto-Save"` | `EXCLUDE_PATH_KEYWORD="Auto-Save"` |
+| `$_.FullName -notmatch "Auto-Save"` | `EXCLUDE_PATH_KEYWORD="Auto-Save"`（ハードコード） + `config.excludedFolders` / `config.excludedFolderNames`（ユーザー設定） |
 | `$_.FullName -match "\\\d{6}\("` | `FOLDER_NAME_REGEX=r"^\d{6}\("` |
 | `$_.BaseName + "_Latest.prproj"` | `BACKUP_SUFFIX="_Latest.prproj"` |
 | `Copy-Item -Force` | 原子的コピー（`.part` → rename） |
@@ -360,4 +366,5 @@ yuru-auto-backup-gdrive/
 - **スリープ時の取りこぼし**: 定時に PC がオフ／スリープだった場合、次回起動時に即時実行する（常時有効）。
 - **Drive フォルダパス選択**: 自動検出した同期ルートをフォルダ選択ダイアログの起点にする方式（`DrivePathDetector`）。検出失敗時は通常のフォルダ選択ダイアログにフォールバック。
 - **挙動を規定するパラメータはソース固定**: 対象拡張子・`Auto-Save` 除外・`^\d{6}\(` 正規表現・Drive 待機 300 秒・`_Latest.prproj` サフィックスは 8.3 の定数として持ち、`config.json` には含めない。変更したい場合はソース改修。
+- **ユーザー設定の追加除外（2026-04-24 追加）**: 上記の固定条件は維持しつつ、`excludedFolders`（絶対パス）と `excludedFolderNames`（名前パターン、大文字小文字無視）を `config.json` に追加。現場運用で都度変わる除外（`Proxy` / `Cache` / 特定プロジェクト配下の一部など）を UI から編集できるようにする。どちらも空配列でも可。
 - **設定ファイルの保存先**: 実行ファイルと同じディレクトリ配下の `data/` に置く（ポータブル運用）。書き込み不可な場所にインストールされている場合は `%USERPROFILE%\yuru-auto-backup-gdrive\` にフォールバック。どちらも `data` 扱いとして `config.json` と `logs/backup.log` を保持。

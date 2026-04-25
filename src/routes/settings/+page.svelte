@@ -10,6 +10,7 @@
   let detecting = $state(false);
   let driveCandidates = $state<DriveCandidate[]>([]);
   let showCandidates = $state(false);
+  let newExcludedName = $state("");
 
   onMount(async () => {
     try {
@@ -70,6 +71,35 @@
     if (!config) return false;
     return /^\d{2}:\d{2}$/.test(config.scheduleTime);
   });
+
+  async function addExcludedFolder() {
+    if (!config) return;
+    const picked = await api.pickFolder(config.source ?? undefined);
+    if (!picked) return;
+    if (!config.excludedFolders.includes(picked)) {
+      config.excludedFolders = [...config.excludedFolders, picked];
+    }
+  }
+
+  function removeExcludedFolder(p: string) {
+    if (!config) return;
+    config.excludedFolders = config.excludedFolders.filter((x) => x !== p);
+  }
+
+  function addExcludedName() {
+    if (!config) return;
+    const name = newExcludedName.trim();
+    if (!name) return;
+    if (!config.excludedFolderNames.some((n) => n.toLowerCase() === name.toLowerCase())) {
+      config.excludedFolderNames = [...config.excludedFolderNames, name];
+    }
+    newExcludedName = "";
+  }
+
+  function removeExcludedName(n: string) {
+    if (!config) return;
+    config.excludedFolderNames = config.excludedFolderNames.filter((x) => x !== n);
+  }
 </script>
 
 <section class="space-y-6">
@@ -157,6 +187,76 @@
           <input type="checkbox" bind:checked={config.autoStart} class="rounded" />
           <span class="text-sm">Windows ログオン時に自動起動</span>
         </label>
+      </div>
+
+      <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 space-y-4">
+        <div>
+          <h3 class="text-sm font-medium">除外フォルダ（パス指定）</h3>
+          <p class="text-xs text-slate-500 mt-1">
+            選んだフォルダ配下はバックアップの対象から外れます（サブツリー全体）。
+          </p>
+        </div>
+        {#if config.excludedFolders.length > 0}
+          <ul class="divide-y divide-slate-200 dark:divide-slate-700 border border-slate-200 dark:border-slate-700 rounded-md">
+            {#each config.excludedFolders as p}
+              <li class="px-3 py-2 flex items-center justify-between gap-2">
+                <span class="text-xs font-mono break-all min-w-0">{p}</span>
+                <button
+                  class="text-xs px-2 py-1 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-red-50 dark:hover:bg-red-900/30 hover:text-red-600 shrink-0"
+                  onclick={() => removeExcludedFolder(p)}
+                >削除</button>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="text-xs text-slate-500">除外フォルダはありません。</p>
+        {/if}
+        <button
+          class="text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700"
+          onclick={addExcludedFolder}
+          disabled={!config.source}
+        >＋ 除外フォルダを追加</button>
+        {#if !config.source}
+          <p class="text-xs text-slate-500">監視元フォルダを先に設定してください。</p>
+        {/if}
+
+        <hr class="border-slate-200 dark:border-slate-700" />
+
+        <div>
+          <h3 class="text-sm font-medium">除外フォルダ名（パターン）</h3>
+          <p class="text-xs text-slate-500 mt-1">
+            この名前のフォルダ配下はすべて除外されます（大文字小文字を区別しません）。例: <code>Cache</code>, <code>Proxy</code>
+          </p>
+        </div>
+        {#if config.excludedFolderNames.length > 0}
+          <ul class="flex flex-wrap gap-2">
+            {#each config.excludedFolderNames as n}
+              <li class="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-700 px-3 py-1 text-xs">
+                <span class="font-mono">{n}</span>
+                <button
+                  class="text-slate-500 hover:text-red-600"
+                  aria-label="削除"
+                  onclick={() => removeExcludedName(n)}
+                >×</button>
+              </li>
+            {/each}
+          </ul>
+        {:else}
+          <p class="text-xs text-slate-500">除外フォルダ名はありません。</p>
+        {/if}
+        <div class="flex gap-2">
+          <input
+            type="text"
+            placeholder="例: Cache"
+            bind:value={newExcludedName}
+            onkeydown={(e) => e.key === "Enter" && (e.preventDefault(), addExcludedName())}
+            class="flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
+          />
+          <button
+            class="text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700"
+            onclick={addExcludedName}
+          >追加</button>
+        </div>
       </div>
 
       <div class="flex gap-3">

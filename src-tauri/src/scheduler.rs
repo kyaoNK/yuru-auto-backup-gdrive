@@ -209,7 +209,11 @@ fn run_job(store: &ConfigStore, logger: &Logger, reporter: &dyn JobReporter, cfg
         return;
     }
 
-    match BackupJob::new(&src, &dest).run() {
+    match BackupJob::new(&src, &dest)
+        .with_excluded_folders(cfg.excluded_folders.clone())
+        .with_excluded_folder_names(cfg.excluded_folder_names.clone())
+        .run()
+    {
         Ok(outcome) => {
             logger.info(&format!(
                 "Backup complete: {} copied, {} errors",

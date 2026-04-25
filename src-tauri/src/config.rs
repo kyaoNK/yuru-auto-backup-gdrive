@@ -45,6 +45,10 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub auto_start: bool,
     #[serde(default)]
+    pub excluded_folders: Vec<PathBuf>,
+    #[serde(default)]
+    pub excluded_folder_names: Vec<String>,
+    #[serde(default)]
     pub last_run_at: Option<DateTime<Local>>,
     #[serde(default)]
     pub last_summary: Option<JobSummary>,
@@ -57,6 +61,8 @@ impl Default for Config {
             destination: None,
             schedule_time: default_schedule_time(),
             auto_start: true,
+            excluded_folders: Vec::new(),
+            excluded_folder_names: Vec::new(),
             last_run_at: None,
             last_summary: None,
         }

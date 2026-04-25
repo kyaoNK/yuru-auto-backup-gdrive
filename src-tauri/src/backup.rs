@@ -45,6 +45,8 @@ pub struct JobOutcome {
 pub struct BackupJob {
     source: PathBuf,
     destination: PathBuf,
+    excluded_folders: Vec<PathBuf>,
+    excluded_folder_names: Vec<String>,
 }
 
 impl BackupJob {
@@ -52,7 +54,19 @@ impl BackupJob {
         Self {
             source: source.into(),
             destination: destination.into(),
+            excluded_folders: Vec::new(),
+            excluded_folder_names: Vec::new(),
         }
+    }
+
+    pub fn with_excluded_folders(mut self, folders: Vec<PathBuf>) -> Self {
+        self.excluded_folders = folders;
+        self
+    }
+
+    pub fn with_excluded_folder_names(mut self, names: Vec<String>) -> Self {
+        self.excluded_folder_names = names;
+        self
     }
 
     pub fn run(&self) -> Result<JobOutcome, BackupError> {
@@ -64,11 +78,17 @@ impl BackupJob {
         }
 
         let folder_re = Regex::new(FOLDER_NAME_REGEX).expect("invariant: FOLDER_NAME_REGEX is valid");
+        let lowered_names: Vec<String> = self
+            .excluded_folder_names
+            .iter()
+            .filter(|n| !n.trim().is_empty())
+            .map(|n| n.to_lowercase())
+            .collect();
         let mut outcome = JobOutcome::default();
 
         for entry in WalkDir::new(&self.source).into_iter().filter_map(Result::ok) {
             let path = entry.path();
-            if !should_backup(path, &folder_re) {
+            if !should_backup(path, &folder_re, &self.excluded_folders, &lowered_names) {
                 continue;
             }
 
@@ -96,7 +116,12 @@ impl BackupJob {
     }
 }
 
-pub fn should_backup(path: &Path, folder_re: &Regex) -> bool {
+pub fn should_backup(
+    path: &Path,
+    folder_re: &Regex,
+    excluded_folders: &[PathBuf],
+    excluded_folder_names_lower: &[String],
+) -> bool {
     if !path.is_file() {
         return false;
     }
@@ -106,7 +131,16 @@ pub fn should_backup(path: &Path, folder_re: &Regex) -> bool {
     if path.to_string_lossy().contains(EXCLUDE_PATH_KEYWORD) {
         return false;
     }
-    ancestor_folder_matches(path, folder_re)
+    if !ancestor_folder_matches(path, folder_re) {
+        return false;
+    }
+    if is_under_excluded_folder(path, excluded_folders) {
+        return false;
+    }
+    if has_ancestor_with_excluded_name(path, excluded_folder_names_lower) {
+        return false;
+    }
+    true
 }
 
 fn ancestor_folder_matches(path: &Path, re: &Regex) -> bool {
@@ -114,6 +148,27 @@ fn ancestor_folder_matches(path: &Path, re: &Regex) -> bool {
         a.file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|name| re.is_match(name))
+    })
+}
+
+fn is_under_excluded_folder(path: &Path, excluded: &[PathBuf]) -> bool {
+    if excluded.is_empty() {
+        return false;
+    }
+    path.ancestors().any(|a| excluded.iter().any(|e| a == e))
+}
+
+fn has_ancestor_with_excluded_name(path: &Path, lowered_names: &[String]) -> bool {
+    if lowered_names.is_empty() {
+        return false;
+    }
+    path.ancestors().any(|a| {
+        a.file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|name| {
+                let lower = name.to_lowercase();
+                lowered_names.iter().any(|n| n == &lower)
+            })
     })
 }
 
@@ -165,7 +220,7 @@ mod tests {
                 .join("250304(3)_クイズ")
                 .join("project.prproj");
             touch(&p);
-            assert!(should_backup(&p, &regex()));
+            assert!(should_backup(&p, &regex(), &[], &[]));
         }
 
         #[test]
@@ -173,7 +228,7 @@ mod tests {
             let tmp = tempdir().unwrap();
             let p = tmp.path().join("MyProject").join("project.prproj");
             touch(&p);
-            assert!(!should_backup(&p, &regex()));
+            assert!(!should_backup(&p, &regex(), &[], &[]));
         }
 
         #[test]
@@ -181,7 +236,7 @@ mod tests {
             let tmp = tempdir().unwrap();
             let p = tmp.path().join("250304(1)_foo").join("notes.txt");
             touch(&p);
-            assert!(!should_backup(&p, &regex()));
+            assert!(!should_backup(&p, &regex(), &[], &[]));
         }
 
         #[test]
@@ -193,7 +248,7 @@ mod tests {
                 .join("Adobe Premiere Pro Auto-Save")
                 .join("project.prproj");
             touch(&p);
-            assert!(!should_backup(&p, &regex()));
+            assert!(!should_backup(&p, &regex(), &[], &[]));
         }
 
         #[test]
@@ -206,7 +261,7 @@ mod tests {
                 .join("deeper")
                 .join("file.prproj");
             touch(&p);
-            assert!(should_backup(&p, &regex()));
+            assert!(should_backup(&p, &regex(), &[], &[]));
         }
 
         #[test]
@@ -214,7 +269,7 @@ mod tests {
             let tmp = tempdir().unwrap();
             let p = tmp.path().join("12345(X)_five").join("project.prproj");
             touch(&p);
-            assert!(!should_backup(&p, &regex()));
+            assert!(!should_backup(&p, &regex(), &[], &[]));
         }
 
         #[test]
@@ -222,7 +277,66 @@ mod tests {
             let tmp = tempdir().unwrap();
             let p = tmp.path().join("250304_nosep").join("project.prproj");
             touch(&p);
-            assert!(!should_backup(&p, &regex()));
+            assert!(!should_backup(&p, &regex(), &[], &[]));
+        }
+
+        #[test]
+        fn excludes_when_under_excluded_folder_path() {
+            let tmp = tempdir().unwrap();
+            let proxy = tmp.path().join("250304(3)_クイズ").join("Proxy");
+            let p = proxy.join("sub").join("clip.prproj");
+            touch(&p);
+            let excluded = vec![proxy];
+            assert!(!should_backup(&p, &regex(), &excluded, &[]));
+        }
+
+        #[test]
+        fn excluded_folder_path_does_not_affect_siblings() {
+            let tmp = tempdir().unwrap();
+            let project = tmp.path().join("250304(3)_クイズ");
+            let proxy = project.join("Proxy");
+            touch(&proxy.join("p.prproj"));
+            let kept = project.join("main.prproj");
+            touch(&kept);
+            let excluded = vec![proxy];
+            assert!(should_backup(&kept, &regex(), &excluded, &[]));
+        }
+
+        #[test]
+        fn excludes_when_ancestor_name_matches_case_insensitive() {
+            let tmp = tempdir().unwrap();
+            let p = tmp
+                .path()
+                .join("250304(3)_クイズ")
+                .join("CACHE")
+                .join("c.prproj");
+            touch(&p);
+            let names = vec!["cache".to_string()];
+            assert!(!should_backup(&p, &regex(), &[], &names));
+        }
+
+        #[test]
+        fn name_exclusion_does_not_partial_match() {
+            let tmp = tempdir().unwrap();
+            let p = tmp
+                .path()
+                .join("250304(3)_クイズ")
+                .join("MyCache_v2")
+                .join("c.prproj");
+            touch(&p);
+            let names = vec!["cache".to_string()];
+            assert!(should_backup(&p, &regex(), &[], &names));
+        }
+
+        #[test]
+        fn empty_exclusions_are_no_op() {
+            let tmp = tempdir().unwrap();
+            let p = tmp
+                .path()
+                .join("250304(3)_クイズ")
+                .join("project.prproj");
+            touch(&p);
+            assert!(should_backup(&p, &regex(), &[], &[]));
         }
     }
 
@@ -349,6 +463,39 @@ mod tests {
                 .run()
                 .unwrap_err();
             assert!(matches!(err, BackupError::DestinationMissing(_)));
+        }
+
+        #[test]
+        fn respects_excluded_folder_paths_in_run() {
+            let e = env();
+            let project = e.src.join("250304(1)_a");
+            let proxy = project.join("Proxy");
+            touch(&project.join("keep.prproj"));
+            touch(&proxy.join("skip.prproj"));
+
+            let outcome = BackupJob::new(&e.src, &e.dest)
+                .with_excluded_folders(vec![proxy])
+                .run()
+                .unwrap();
+
+            assert_eq!(outcome.summary.copied, 1);
+            assert!(e.dest.join("keep_Latest.prproj").is_file());
+            assert!(!e.dest.join("skip_Latest.prproj").is_file());
+        }
+
+        #[test]
+        fn respects_excluded_folder_names_in_run() {
+            let e = env();
+            touch(&e.src.join("250304(1)_a").join("Cache").join("a.prproj"));
+            touch(&e.src.join("250304(1)_a").join("keep.prproj"));
+
+            let outcome = BackupJob::new(&e.src, &e.dest)
+                .with_excluded_folder_names(vec!["cache".into()])
+                .run()
+                .unwrap();
+
+            assert_eq!(outcome.summary.copied, 1);
+            assert!(e.dest.join("keep_Latest.prproj").is_file());
         }
 
         #[test]

@@ -13,7 +13,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 The design has already gone through several decision rounds — do not re-litigate decisions marked in `## 確定事項`. Examples of already-closed questions:
 
 - Target is **`.prproj` only**; do not add configurable extension lists.
-- Filter constants (`^\d{6}\(` regex, `Auto-Save` exclusion, 300-second Drive wait, `_Latest.prproj` suffix) are **hardcoded in source**, not in `config.json`. User-facing config is deliberately limited to 6 fields.
+- Filter constants (`^\d{6}\(` regex, `Auto-Save` exclusion, 300-second Drive wait, `_Latest.prproj` suffix) are **hardcoded in source**, not in `config.json`. User-facing config is deliberately minimal: user-editable are only `source` / `destination` / `scheduleTime` / `autoStart` / `excludedFolders` / `excludedFolderNames`; `lastRunAt` / `lastSummary` are persisted state.
 - **Resident mode only** — no CLI subcommands, no Task Scheduler integration.
 - Catch-up-on-startup is **always on** (not a toggle).
 - Config/logs live in `<exe_dir>/data/` with fallback to `%USERPROFILE%\yuru-auto-backup-gdrive\`. Do not use `%APPDATA%`.

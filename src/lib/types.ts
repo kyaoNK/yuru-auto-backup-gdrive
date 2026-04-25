@@ -8,6 +8,8 @@ export interface Config {
   destination: string | null;
   scheduleTime: string;
   autoStart: boolean;
+  excludedFolders: string[];
+  excludedFolderNames: string[];
   lastRunAt: string | null;
   lastSummary: JobSummary | null;
 }
