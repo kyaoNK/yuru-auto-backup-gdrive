@@ -1,5 +1,6 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tauri::{
     menu::{Menu, MenuItem},
@@ -53,14 +54,15 @@ impl JobReporter for TauriReporter {
     }
 }
 
-fn sync_autostart(app: &AppHandle, enabled: bool) {
+pub(crate) fn sync_autostart(app: &AppHandle, enabled: bool) -> Result<(), String> {
     let mgr = app.autolaunch();
-    let currently = mgr.is_enabled().unwrap_or(false);
+    let currently = mgr.is_enabled().map_err(|e| e.to_string())?;
     if enabled && !currently {
-        let _ = mgr.enable();
+        mgr.enable().map_err(|e| e.to_string())?;
     } else if !enabled && currently {
-        let _ = mgr.disable();
+        mgr.disable().map_err(|e| e.to_string())?;
     }
+    Ok(())
 }
 
 fn build_tray(app: &AppHandle) -> tauri::Result<()> {
@@ -82,10 +84,31 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
             }
             "run_now" => {
                 if let Some(state) = app.try_state::<AppState>() {
-                    let _ = state.scheduler.run_now();
+                    if !state.running.load(Ordering::SeqCst) {
+                        let _ = state.scheduler.run_now();
+                    }
                 }
             }
             "quit" => {
+                if let Some(state) = app.try_state::<AppState>() {
+                    let handle = state
+                        .scheduler_handle
+                        .lock()
+                        .ok()
+                        .and_then(|mut guard| guard.take());
+                    if let Some(handle) = handle {
+                        let stopped = handle.shutdown_with_timeout(Duration::from_secs(30));
+                        if !stopped {
+                            state
+                                .logger
+                                .warn("Scheduler did not stop within 30 seconds; exiting anyway");
+                        }
+                    } else {
+                        state
+                            .logger
+                            .warn("Scheduler handle was not available at shutdown");
+                    }
+                }
                 app.exit(0);
             }
             _ => {}
@@ -110,7 +133,19 @@ fn build_tray(app: &AppHandle) -> tauri::Result<()> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+
+    #[cfg(desktop)]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.show();
+                let _ = w.set_focus();
+            }
+        }));
+    }
+
+    builder
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
@@ -124,9 +159,8 @@ pub fn run() {
             app_dir.ensure_exists().expect("failed to create app dir");
 
             let config_store = Arc::new(ConfigStore::new(app_dir.config_path()));
-            let logger = Arc::new(
-                Logger::open(&app_dir.log_file()).expect("failed to open log file"),
-            );
+            let logger =
+                Arc::new(Logger::open(&app_dir.log_file()).expect("failed to open log file"));
             let running = Arc::new(AtomicBool::new(false));
 
             let reporter: Arc<dyn JobReporter> = Arc::new(TauriReporter {
@@ -134,15 +168,11 @@ pub fn run() {
                 running: running.clone(),
             });
 
-            let scheduler_handle = scheduler::start(
-                config_store.clone(),
-                logger.clone(),
-                reporter,
-            );
+            let scheduler_handle = scheduler::start(config_store.clone(), logger.clone(), reporter);
             let scheduler_sender = scheduler_handle.sender();
 
             if let Ok(cfg) = config_store.load() {
-                sync_autostart(&handle, cfg.auto_start);
+                let _ = sync_autostart(&handle, cfg.auto_start);
             }
 
             app.manage(AppState {
@@ -150,6 +180,7 @@ pub fn run() {
                 config_store,
                 logger,
                 scheduler: scheduler_sender,
+                scheduler_handle: Mutex::new(Some(scheduler_handle)),
                 running,
             });
 

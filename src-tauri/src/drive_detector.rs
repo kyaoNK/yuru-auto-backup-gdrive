@@ -3,12 +3,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-const DRIVE_FOLDER_NAMES: &[&str] = &[
-    "マイドライブ",
-    "My Drive",
-    "共有ドライブ",
-    "Shared drives",
-];
+const DRIVE_FOLDER_NAMES: &[&str] = &["マイドライブ", "My Drive", "共有ドライブ", "Shared drives"];
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

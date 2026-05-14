@@ -85,12 +85,7 @@ mod tests {
             tx.send(()).unwrap();
         });
 
-        wait_with(
-            &late,
-            Duration::from_millis(500),
-            Duration::from_millis(20),
-        )
-        .unwrap();
+        wait_with(&late, Duration::from_millis(500), Duration::from_millis(20)).unwrap();
 
         rx.recv().unwrap();
         handle.join().unwrap();

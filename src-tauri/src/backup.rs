@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::fs;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -77,18 +77,29 @@ impl BackupJob {
             return Err(BackupError::DestinationMissing(self.destination.clone()));
         }
 
-        let folder_re = Regex::new(FOLDER_NAME_REGEX).expect("invariant: FOLDER_NAME_REGEX is valid");
+        let folder_re =
+            Regex::new(FOLDER_NAME_REGEX).expect("invariant: FOLDER_NAME_REGEX is valid");
         let lowered_names: Vec<String> = self
             .excluded_folder_names
             .iter()
             .filter(|n| !n.trim().is_empty())
             .map(|n| n.to_lowercase())
             .collect();
+        let mut effective_excluded_folders = self.excluded_folders.clone();
+        effective_excluded_folders.push(self.destination.clone());
         let mut outcome = JobOutcome::default();
 
-        for entry in WalkDir::new(&self.source).into_iter().filter_map(Result::ok) {
+        for entry in WalkDir::new(&self.source)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             let path = entry.path();
-            if !should_backup(path, &folder_re, &self.excluded_folders, &lowered_names) {
+            if !should_backup(
+                path,
+                &folder_re,
+                &effective_excluded_folders,
+                &lowered_names,
+            ) {
                 continue;
             }
 
@@ -125,10 +136,14 @@ pub fn should_backup(
     if !path.is_file() {
         return false;
     }
-    if path.extension().and_then(|e| e.to_str()) != Some(TARGET_EXTENSION) {
+    if !path
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| e.eq_ignore_ascii_case(TARGET_EXTENSION))
+    {
         return false;
     }
-    if path.to_string_lossy().contains(EXCLUDE_PATH_KEYWORD) {
+    if contains_case_insensitive_ascii(&path.to_string_lossy(), EXCLUDE_PATH_KEYWORD) {
         return false;
     }
     if !ancestor_folder_matches(path, folder_re) {
@@ -155,7 +170,8 @@ fn is_under_excluded_folder(path: &Path, excluded: &[PathBuf]) -> bool {
     if excluded.is_empty() {
         return false;
     }
-    path.ancestors().any(|a| excluded.iter().any(|e| a == e))
+    path.ancestors()
+        .any(|a| excluded.iter().any(|e| paths_equal_for_exclusion(a, e)))
 }
 
 fn has_ancestor_with_excluded_name(path: &Path, lowered_names: &[String]) -> bool {
@@ -163,12 +179,10 @@ fn has_ancestor_with_excluded_name(path: &Path, lowered_names: &[String]) -> boo
         return false;
     }
     path.ancestors().any(|a| {
-        a.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|name| {
-                let lower = name.to_lowercase();
-                lowered_names.iter().any(|n| n == &lower)
-            })
+        a.file_name().and_then(|n| n.to_str()).is_some_and(|name| {
+            let lower = name.to_lowercase();
+            lowered_names.iter().any(|n| n == &lower)
+        })
     })
 }
 
@@ -195,6 +209,45 @@ fn copy_atomic(src: &Path, dest: &Path) -> io::Result<()> {
     Ok(())
 }
 
+fn contains_case_insensitive_ascii(haystack: &str, needle: &str) -> bool {
+    haystack
+        .to_ascii_lowercase()
+        .contains(&needle.to_ascii_lowercase())
+}
+
+fn paths_equal_for_exclusion(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => path_key(&ca) == path_key(&cb),
+        _ => path_key(a) == path_key(b),
+    }
+}
+
+fn path_key(path: &Path) -> String {
+    let mut parts = Vec::new();
+    for component in path.components() {
+        let part = match component {
+            Component::Prefix(prefix) => prefix.as_os_str().to_string_lossy().into_owned(),
+            Component::RootDir => String::from(std::path::MAIN_SEPARATOR),
+            Component::CurDir => continue,
+            Component::ParentDir => String::from(".."),
+            Component::Normal(s) => s.to_string_lossy().into_owned(),
+        };
+        parts.push(part);
+    }
+
+    let separator = std::path::MAIN_SEPARATOR.to_string();
+    let joined = parts.join(&separator);
+    if cfg!(windows) {
+        joined.to_ascii_lowercase()
+    } else {
+        joined
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,10 +268,15 @@ mod tests {
         #[test]
         fn includes_prproj_under_six_digit_folder() {
             let tmp = tempdir().unwrap();
-            let p = tmp
-                .path()
-                .join("250304(3)_クイズ")
-                .join("project.prproj");
+            let p = tmp.path().join("250304(3)_クイズ").join("project.prproj");
+            touch(&p);
+            assert!(should_backup(&p, &regex(), &[], &[]));
+        }
+
+        #[test]
+        fn includes_prproj_extension_case_insensitive() {
+            let tmp = tempdir().unwrap();
+            let p = tmp.path().join("250304(3)_クイズ").join("PROJECT.PRPROJ");
             touch(&p);
             assert!(should_backup(&p, &regex(), &[], &[]));
         }
@@ -246,6 +304,18 @@ mod tests {
                 .path()
                 .join("250304(2)_foo")
                 .join("Adobe Premiere Pro Auto-Save")
+                .join("project.prproj");
+            touch(&p);
+            assert!(!should_backup(&p, &regex(), &[], &[]));
+        }
+
+        #[test]
+        fn excludes_auto_save_case_insensitive() {
+            let tmp = tempdir().unwrap();
+            let p = tmp
+                .path()
+                .join("250304(2)_foo")
+                .join("adobe premiere pro auto-save")
                 .join("project.prproj");
             touch(&p);
             assert!(!should_backup(&p, &regex(), &[], &[]));
@@ -290,6 +360,17 @@ mod tests {
             assert!(!should_backup(&p, &regex(), &excluded, &[]));
         }
 
+        #[cfg(windows)]
+        #[test]
+        fn excludes_when_under_excluded_folder_path_with_different_case_on_windows() {
+            let tmp = tempdir().unwrap();
+            let proxy = tmp.path().join("250304(3)_クイズ").join("Proxy");
+            let p = proxy.join("sub").join("clip.prproj");
+            touch(&p);
+            let excluded = vec![PathBuf::from(proxy.to_string_lossy().to_ascii_lowercase())];
+            assert!(!should_backup(&p, &regex(), &excluded, &[]));
+        }
+
         #[test]
         fn excluded_folder_path_does_not_affect_siblings() {
             let tmp = tempdir().unwrap();
@@ -331,10 +412,7 @@ mod tests {
         #[test]
         fn empty_exclusions_are_no_op() {
             let tmp = tempdir().unwrap();
-            let p = tmp
-                .path()
-                .join("250304(3)_クイズ")
-                .join("project.prproj");
+            let p = tmp.path().join("250304(3)_クイズ").join("project.prproj");
             touch(&p);
             assert!(should_backup(&p, &regex(), &[], &[]));
         }
@@ -499,6 +577,23 @@ mod tests {
         }
 
         #[test]
+        fn skips_destination_subtree_even_when_destination_is_inside_source() {
+            let tmp = tempdir().unwrap();
+            let src = tmp.path().join("src");
+            let project = src.join("250304(1)_a");
+            let dest = project.join("backup");
+            fs::create_dir_all(&dest).unwrap();
+            touch(&project.join("main.prproj"));
+            touch(&dest.join("old_Latest.prproj"));
+
+            let outcome = BackupJob::new(&src, &dest).run().unwrap();
+
+            assert_eq!(outcome.summary.copied, 1);
+            assert!(dest.join("main_Latest.prproj").is_file());
+            assert!(!dest.join("old_Latest_Latest.prproj").exists());
+        }
+
+        #[test]
         fn leaves_no_part_file_after_successful_copy() {
             let e = env();
             touch(&e.src.join("250304(1)_a").join("p.prproj"));
@@ -508,11 +603,7 @@ mod tests {
             let leftovers: Vec<_> = fs::read_dir(&e.dest)
                 .unwrap()
                 .filter_map(|r| r.ok())
-                .filter(|e| {
-                    e.path()
-                        .to_string_lossy()
-                        .ends_with(".part")
-                })
+                .filter(|e| e.path().to_string_lossy().ends_with(".part"))
                 .collect();
             assert!(leftovers.is_empty());
         }

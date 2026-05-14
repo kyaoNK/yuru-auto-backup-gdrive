@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -31,10 +31,31 @@ impl Logger {
     }
 
     pub fn tail(&self, limit: usize) -> io::Result<Vec<String>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
         if !self.path.exists() {
             return Ok(Vec::new());
         }
-        let text = fs::read_to_string(&self.path)?;
+        let mut file = fs::File::open(&self.path)?;
+        let len = file.metadata()?.len();
+        let mut pos = len;
+        let mut bytes = Vec::new();
+        let mut newline_count = 0usize;
+        const CHUNK_SIZE: u64 = 8192;
+
+        while pos > 0 && newline_count <= limit {
+            let read_len = CHUNK_SIZE.min(pos);
+            pos -= read_len;
+            file.seek(SeekFrom::Start(pos))?;
+            let mut chunk = vec![0u8; read_len as usize];
+            file.read_exact(&mut chunk)?;
+            newline_count += chunk.iter().filter(|&&b| b == b'\n').count();
+            chunk.extend(bytes);
+            bytes = chunk;
+        }
+
+        let text = String::from_utf8_lossy(&bytes);
         let mut buf: VecDeque<String> = VecDeque::with_capacity(limit);
         for line in text.lines() {
             if buf.len() == limit {
@@ -111,6 +132,16 @@ mod tests {
         assert_eq!(tail.len(), 3);
         assert!(tail[2].contains("line 9"));
         assert!(tail[0].contains("line 7"));
+    }
+
+    #[test]
+    fn tail_zero_returns_empty() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("backup.log");
+        let logger = Logger::open(&path).unwrap();
+        logger.info("line");
+
+        assert!(logger.tail(0).unwrap().is_empty());
     }
 
     #[test]

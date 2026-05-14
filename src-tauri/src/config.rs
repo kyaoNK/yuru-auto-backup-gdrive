@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, PoisonError};
 
 use chrono::{DateTime, Local};
 use serde::{Deserialize, Serialize};
@@ -31,6 +32,8 @@ pub enum ConfigError {
     },
     #[error("failed to serialize config: {0}")]
     SerializeFailed(#[from] serde_json::Error),
+    #[error("config store lock was poisoned")]
+    LockPoisoned,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -79,32 +82,80 @@ fn default_true() -> bool {
 
 pub struct ConfigStore {
     path: PathBuf,
+    lock: Mutex<()>,
 }
 
 impl ConfigStore {
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        Self { path: path.into() }
+        Self {
+            path: path.into(),
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
     }
 
+    pub fn backup_path(&self) -> PathBuf {
+        self.path.with_extension("json.bak")
+    }
+
     pub fn load(&self) -> Result<Config, ConfigError> {
+        let _guard = self.lock.lock().map_err(lock_poisoned)?;
+        self.load_unlocked()
+    }
+
+    fn load_unlocked(&self) -> Result<Config, ConfigError> {
         if !self.path.exists() {
             return Ok(Config::default());
         }
-        let text = fs::read_to_string(&self.path).map_err(|source| ConfigError::ReadFailed {
-            path: self.path.clone(),
+        match self.load_from_path(&self.path) {
+            Ok(cfg) => Ok(cfg),
+            Err(primary_err) => {
+                let backup = self.backup_path();
+                if backup.exists() {
+                    if let Ok(cfg) = self.load_from_path(&backup) {
+                        return Ok(cfg);
+                    }
+                }
+                if matches!(primary_err, ConfigError::ParseFailed { .. }) {
+                    Ok(Config::default())
+                } else {
+                    Err(primary_err)
+                }
+            }
+        }
+    }
+
+    fn load_from_path(&self, path: &Path) -> Result<Config, ConfigError> {
+        let text = fs::read_to_string(path).map_err(|source| ConfigError::ReadFailed {
+            path: path.to_path_buf(),
             source,
         })?;
         serde_json::from_str(&text).map_err(|source| ConfigError::ParseFailed {
-            path: self.path.clone(),
+            path: path.to_path_buf(),
             source,
         })
     }
 
     pub fn save(&self, config: &Config) -> Result<(), ConfigError> {
+        let _guard = self.lock.lock().map_err(lock_poisoned)?;
+        self.save_unlocked(config)
+    }
+
+    pub fn update<F>(&self, f: F) -> Result<Config, ConfigError>
+    where
+        F: FnOnce(&mut Config),
+    {
+        let _guard = self.lock.lock().map_err(lock_poisoned)?;
+        let mut config = self.load_unlocked()?;
+        f(&mut config);
+        self.save_unlocked(&config)?;
+        Ok(config)
+    }
+
+    fn save_unlocked(&self, config: &Config) -> Result<(), ConfigError> {
         let text = serde_json::to_string_pretty(config)?;
         if let Some(parent) = self.path.parent() {
             fs::create_dir_all(parent).map_err(|source| ConfigError::WriteFailed {
@@ -117,11 +168,22 @@ impl ConfigStore {
             path: tmp.clone(),
             source,
         })?;
+        if self.path.exists() {
+            let backup = self.backup_path();
+            fs::copy(&self.path, &backup).map_err(|source| ConfigError::WriteFailed {
+                path: backup,
+                source,
+            })?;
+        }
         fs::rename(&tmp, &self.path).map_err(|source| ConfigError::WriteFailed {
             path: self.path.clone(),
             source,
         })
     }
+}
+
+fn lock_poisoned<T>(_: PoisonError<T>) -> ConfigError {
+    ConfigError::LockPoisoned
 }
 
 #[cfg(test)]
@@ -206,5 +268,74 @@ mod tests {
 
         let tmp_path = store.path().with_extension("json.tmp");
         assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn save_keeps_previous_config_as_backup() {
+        let (_tmp, store) = store_in_tmp();
+        let first = Config {
+            schedule_time: "08:00".into(),
+            ..Config::default()
+        };
+        let second = Config {
+            schedule_time: "10:00".into(),
+            ..Config::default()
+        };
+
+        store.save(&first).unwrap();
+        store.save(&second).unwrap();
+
+        let backup_text = fs::read_to_string(store.backup_path()).unwrap();
+        let backup: Config = serde_json::from_str(&backup_text).unwrap();
+        assert_eq!(backup.schedule_time, "08:00");
+        assert_eq!(store.load().unwrap().schedule_time, "10:00");
+    }
+
+    #[test]
+    fn load_falls_back_to_backup_when_primary_is_broken() {
+        let (_tmp, store) = store_in_tmp();
+        let cfg = Config {
+            schedule_time: "11:30".into(),
+            ..Config::default()
+        };
+        store.save(&cfg).unwrap();
+        fs::write(store.backup_path(), serde_json::to_string(&cfg).unwrap()).unwrap();
+        fs::write(store.path(), "{ broken json").unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.schedule_time, "11:30");
+    }
+
+    #[test]
+    fn load_returns_default_when_primary_is_broken_and_no_backup_works() {
+        let (_tmp, store) = store_in_tmp();
+        fs::write(store.path(), "{ broken json").unwrap();
+
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded, Config::default());
+    }
+
+    #[test]
+    fn update_loads_modifies_and_saves_under_one_store_operation() {
+        let (_tmp, store) = store_in_tmp();
+        store
+            .save(&Config {
+                schedule_time: "08:00".into(),
+                ..Config::default()
+            })
+            .unwrap();
+
+        let updated = store
+            .update(|cfg| {
+                cfg.schedule_time = "17:45".into();
+                cfg.last_summary = Some(JobSummary {
+                    copied: 2,
+                    errors: 0,
+                });
+            })
+            .unwrap();
+
+        assert_eq!(updated.schedule_time, "17:45");
+        assert_eq!(store.load().unwrap().last_summary.unwrap().copied, 2);
     }
 }

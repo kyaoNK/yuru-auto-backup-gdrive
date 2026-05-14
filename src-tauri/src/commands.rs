@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
 use serde::Serialize;
@@ -20,6 +20,7 @@ pub struct AppState {
     pub config_store: Arc<ConfigStore>,
     pub logger: Arc<Logger>,
     pub scheduler: SchedulerSender,
+    pub scheduler_handle: Mutex<Option<scheduler::SchedulerHandle>>,
     pub running: Arc<AtomicBool>,
 }
 
@@ -46,12 +47,23 @@ pub fn get_config(state: State<'_, AppState>) -> Result<Config, String> {
 }
 
 #[tauri::command]
-pub fn update_config(state: State<'_, AppState>, config: Config) -> Result<(), String> {
-    let mut cfg = config;
-    let existing = state.config_store.load().unwrap_or_default();
-    cfg.last_run_at = existing.last_run_at;
-    cfg.last_summary = existing.last_summary;
-    state.config_store.save(&cfg).map_err(err_to_string)?;
+pub fn update_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    config: Config,
+) -> Result<(), String> {
+    scheduler::parse_schedule(&config.schedule_time).map_err(err_to_string)?;
+    let auto_start = config.auto_start;
+    state
+        .config_store
+        .update(|existing| {
+            let mut next = config;
+            next.last_run_at = existing.last_run_at;
+            next.last_summary = existing.last_summary;
+            *existing = next;
+        })
+        .map_err(err_to_string)?;
+    crate::sync_autostart(&app, auto_start)?;
     let _ = state.scheduler.reload();
     Ok(())
 }
@@ -100,11 +112,17 @@ pub fn get_status(state: State<'_, AppState>) -> Result<Status, String> {
 
 #[tauri::command]
 pub fn run_now(state: State<'_, AppState>) -> Result<(), String> {
+    if state.running.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     state.scheduler.run_now().map_err(err_to_string)
 }
 
 #[tauri::command]
-pub fn list_recent_logs(state: State<'_, AppState>, limit: Option<usize>) -> Result<Vec<String>, String> {
+pub fn list_recent_logs(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<String>, String> {
     let n = limit.unwrap_or(200);
     state.logger.tail(n).map_err(err_to_string)
 }
@@ -112,5 +130,7 @@ pub fn list_recent_logs(state: State<'_, AppState>, limit: Option<usize>) -> Res
 #[tauri::command]
 pub fn open_app_dir(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
     let path = state.app_dir.root().to_string_lossy().to_string();
-    app.opener().open_path(path, None::<&str>).map_err(err_to_string)
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(err_to_string)
 }

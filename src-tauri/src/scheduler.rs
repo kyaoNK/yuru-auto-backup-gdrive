@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::Arc;
 use std::thread;
@@ -36,11 +37,21 @@ impl JobReporter for NoopReporter {}
 #[derive(Clone)]
 pub struct SchedulerSender {
     tx: mpsc::Sender<SchedulerCommand>,
+    run_now_pending: Arc<AtomicBool>,
 }
 
 impl SchedulerSender {
     pub fn run_now(&self) -> Result<(), mpsc::SendError<SchedulerCommand>> {
-        self.tx.send(SchedulerCommand::RunNow)
+        if self.run_now_pending.swap(true, Ordering::SeqCst) {
+            return Ok(());
+        }
+        match self.tx.send(SchedulerCommand::RunNow) {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                self.run_now_pending.store(false, Ordering::SeqCst);
+                Err(err)
+            }
+        }
     }
 
     pub fn reload(&self) -> Result<(), mpsc::SendError<SchedulerCommand>> {
@@ -67,6 +78,20 @@ impl SchedulerHandle {
         if let Some(h) = self.join.take() {
             let _ = h.join();
         }
+    }
+
+    pub fn shutdown_with_timeout(mut self, timeout: Duration) -> bool {
+        let _ = self.sender.shutdown();
+        let Some(h) = self.join.take() else {
+            return true;
+        };
+
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let _ = h.join();
+            let _ = tx.send(());
+        });
+        rx.recv_timeout(timeout).is_ok()
     }
 }
 
@@ -120,9 +145,14 @@ pub fn start(
     reporter: Arc<dyn JobReporter>,
 ) -> SchedulerHandle {
     let (tx, rx) = mpsc::channel();
-    let join = thread::spawn(move || run_loop(store, logger, reporter, rx));
+    let run_now_pending = Arc::new(AtomicBool::new(false));
+    let sender = SchedulerSender {
+        tx,
+        run_now_pending: run_now_pending.clone(),
+    };
+    let join = thread::spawn(move || run_loop(store, logger, reporter, rx, run_now_pending));
     SchedulerHandle {
-        sender: SchedulerSender { tx },
+        sender,
         join: Some(join),
     }
 }
@@ -132,6 +162,7 @@ fn run_loop(
     logger: Arc<Logger>,
     reporter: Arc<dyn JobReporter>,
     rx: mpsc::Receiver<SchedulerCommand>,
+    run_now_pending: Arc<AtomicBool>,
 ) {
     if let Ok(cfg) = store.load() {
         if let Ok(sched) = parse_schedule(&cfg.schedule_time) {
@@ -148,8 +179,16 @@ fn run_loop(
             Err(err) => {
                 logger.error(&format!("Failed to load config: {err}"));
                 match rx.recv_timeout(Duration::from_secs(60)) {
+                    Ok(SchedulerCommand::RunNow) => {
+                        run_now_pending.store(false, Ordering::SeqCst);
+                        logger.warn(
+                            "Manual backup request dropped because config could not be loaded",
+                        );
+                        continue;
+                    }
+                    Ok(SchedulerCommand::ReloadConfig) => continue,
                     Ok(SchedulerCommand::Shutdown) | Err(RecvTimeoutError::Disconnected) => return,
-                    _ => continue,
+                    Err(RecvTimeoutError::Timeout) => continue,
                 }
             }
         };
@@ -173,6 +212,7 @@ fn run_loop(
             Ok(SchedulerCommand::RunNow) => {
                 logger.info("Manual backup triggered");
                 run_job(&store, &logger, reporter.as_ref(), &cfg);
+                run_now_pending.store(false, Ordering::SeqCst);
             }
             Ok(SchedulerCommand::ReloadConfig) => continue,
             Ok(SchedulerCommand::Shutdown) => return,
@@ -225,12 +265,11 @@ fn run_job(store: &ConfigStore, logger: &Logger, reporter: &dyn JobReporter, cfg
             for (f, err) in &outcome.errored_files {
                 logger.warn(&format!("  error: {} — {}", f.display(), err));
             }
-            if let Ok(mut updated) = store.load() {
+            if let Err(err) = store.update(|updated| {
                 updated.last_run_at = Some(Local::now());
                 updated.last_summary = Some(outcome.summary);
-                if let Err(err) = store.save(&updated) {
-                    logger.error(&format!("Failed to persist run summary: {err}"));
-                }
+            }) {
+                logger.error(&format!("Failed to persist run summary: {err}"));
             }
             reporter.job_finished(outcome.summary);
         }

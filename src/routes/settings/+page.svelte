@@ -69,7 +69,11 @@
 
   const scheduleValid = $derived.by(() => {
     if (!config) return false;
-    return /^\d{2}:\d{2}$/.test(config.scheduleTime);
+    const m = /^(\d{2}):(\d{2})$/.exec(config.scheduleTime);
+    if (!m) return false;
+    const hour = Number(m[1]);
+    const minute = Number(m[2]);
+    return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
   });
 
   async function addExcludedFolder() {
