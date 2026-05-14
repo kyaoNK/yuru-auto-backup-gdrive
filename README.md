@@ -47,7 +47,7 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 - [Node.js](https://nodejs.org/) (20+)
 
 ```bash
-git clone https://github.com/<your-account>/yuru-auto-backup-gdrive.git
+git clone https://github.com/kyaoNK/yuru-auto-backup-gdrive.git
 cd yuru-auto-backup-gdrive
 npm install
 npm run tauri build
@@ -67,7 +67,7 @@ npm run tauri build
 
 ### 2. 設定
 
-**監視元フォルダ**: Premiere Pro のプロジェクトを置いているフォルダ（例: `F:\pedantic制作`）。
+**監視元フォルダ**: Premiere Pro のプロジェクトを置いているフォルダ（例: `D:\PremiereProjects`）。
 
 **出力先フォルダ**: Google Drive 同期配下の任意のフォルダ。「Google Drive を検出」ボタンを押すと、レジストリ／ドライブレター／慣習パスを総当たりで検出し、候補一覧を表示します。候補をクリックするとそのルートを起点にフォルダ選択ダイアログが開きます。検出に失敗した場合は「選択…」ボタンから手動で選んでください。
 

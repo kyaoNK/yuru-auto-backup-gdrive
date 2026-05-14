@@ -32,5 +32,13 @@
   },
   "overrides": {
     "cookie": "^0.7.2"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kyaoNK/yuru-auto-backup-gdrive.git"
+  },
+  "bugs": {
+    "url": "https://github.com/kyaoNK/yuru-auto-backup-gdrive/issues"
+  },
+  "homepage": "https://github.com/kyaoNK/yuru-auto-backup-gdrive#readme"
 }

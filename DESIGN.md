@@ -16,9 +16,9 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 
 | 項目 | 内容 |
 | --- | --- |
-| OS | Windows 11 Home |
+| OS | Windows 11 |
 | フレームワーク | Tauri (v2) |
-| フロントエンド | TypeScript + 任意の UI フレームワーク（候補: React / Svelte） |
+| フロントエンド | TypeScript + Svelte |
 | バックエンド | Rust |
 | 前提ソフトウェア | Google Drive for desktop（同期クライアント） |
 
@@ -28,7 +28,7 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 
 - 拡張子: `.prproj` のみ
 - 監視元フォルダ配下を**再帰的**に探索
-- フォルダ名条件: 祖先パスのいずれかのフォルダ名が正規表現 `^\d{6}\(` にマッチする必要がある（例: `250304(3)_クイズ...`）
+- フォルダ名条件: 祖先パスのいずれかのフォルダ名が正規表現 `^\d{6}\(` にマッチする必要がある（例: `250304(3)_Project`）
   - 既存スクリプトの `FullName -match "\\\d{6}\("` に相当
 
 ### 4.2 除外条件
@@ -129,14 +129,14 @@ const BACKUP_SUFFIX: &str = "_Latest.prproj";
 
 ### 8.4 DrivePathDetector
 
-Google Drive for desktop の同期ルート（例: `G:\マイドライブ`、`G:\共有ドライブ`）を自動検出する。出力先フォルダ選択時に、検出されたルートを起点にフォルダ選択ダイアログを開くことで、非エンジニアでも迷わず目的のフォルダに辿り着ける。
+Google Drive for desktop の同期ルート（例: `G:\My Drive`、`G:\Shared drives`）を自動検出する。出力先フォルダ選択時に、検出されたルートを起点にフォルダ選択ダイアログを開くことで、非エンジニアでも迷わず目的のフォルダに辿り着ける。
 
 **検出ロジック（複数ソースを試行し、最初に見つかったものを採用）:**
 
 1. **レジストリ参照**: `HKCU\Software\Google\DriveFS\Share` 配下のキー（`BaseDir` / マウントポイント情報）を読む。
 2. **設定ファイル参照**: `%LOCALAPPDATA%\Google\DriveFS\` 配下の `root_preference_sqlite.db` や設定ファイルから現在のマウント情報を取得。
 3. **ドライブレター総当たり**: `A:` から `Z:` まで走査し、ボリュームラベルに `Google Drive` を含むドライブを検出。
-4. **慣習的パスのフォールバック**: `%USERPROFILE%\Google Drive`, `G:\マイドライブ`, `G:\My Drive` などを順に確認。
+4. **慣習的パスのフォールバック**: `%USERPROFILE%\Google Drive`, `G:\My Drive`, `G:\Shared drives` などを順に確認。
 
 検出結果は候補リストとして返し、UI では 1 つ目を既定ハイライトする。検出ゼロ件の場合はユーザーに「Google Drive for desktop が起動しているか確認してください」と案内し、通常のフォルダ選択ダイアログにフォールバックする。
 
@@ -191,11 +191,11 @@ fn run(cfg: &Config) -> JobSummary {
 
 ```json
 {
-  "source": "F:/pedantic制作",
-  "destination": "H:/共有ドライブ/.../バックアップ",
+  "source": "D:/PremiereProjects",
+  "destination": "G:/Shared drives/Team/backup",
   "scheduleTime": "09:00",
   "autoStart": true,
-  "excludedFolders": ["F:/pedantic制作/250304(3)_クイズ/Proxy"],
+  "excludedFolders": ["D:/PremiereProjects/250304(3)_Project/Proxy"],
   "excludedFolderNames": ["Cache", "Render"],
   "lastRunAt": "2026-04-23T09:00:12+09:00",
   "lastSummary": { "copied": 3, "errors": 0 }
@@ -296,7 +296,6 @@ yuru-auto-backup-gdrive/
 │  ├─ routes/
 │  ├─ components/
 │  └─ lib/
-├─ memo.md
 ├─ package.json
 └─ DESIGN.md
 ```
@@ -317,7 +316,7 @@ yuru-auto-backup-gdrive/
 
 ## 13. 主要依存クレート / ライブラリ
 
-- Rust: `tauri`, `serde` + `serde_json`, `tokio`, `walkdir`, `regex`, `chrono`, `tracing`, `tauri-plugin-autostart`, `tauri-plugin-dialog`, `tauri-plugin-opener`
+- Rust: `tauri`, `serde` + `serde_json`, `tokio`, `walkdir`, `regex`, `chrono`, `tauri-plugin-autostart`, `tauri-plugin-dialog`, `tauri-plugin-opener`
 - フロント: `@tauri-apps/api`, UI フレームワーク（未定）
 
 ## 14. 実装ステップ

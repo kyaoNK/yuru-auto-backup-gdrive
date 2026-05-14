@@ -27,3 +27,9 @@ Thumbs.db
 
 # Claude Code local settings
 .claude/settings.local.json
+
+# Runtime app data
+/data/
+config.json
+config.json.bak
+*.tmp

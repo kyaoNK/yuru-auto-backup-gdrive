@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project status
 
-**Design phase — no source code exists yet.** The repository currently contains only `DESIGN.md` (the authoritative specification) and this file. When implementation begins, the Tauri project scaffold will be added. Until then, work in this repo is about refining the design document, not writing application code.
+This repository contains a working Tauri v2 + Svelte 5 implementation. `DESIGN.md` remains the product/behavior specification, and source changes should keep it in sync when behavior changes.
 
 ## Authoritative source
 
@@ -33,7 +33,6 @@ Windows-only Tauri v2 desktop app. Once per day at a user-configured time, scans
 ## Reference material
 
 - `DESIGN.md` section 15 ("既存 PowerShell スクリプトとの対応表") maps every behavior in the original `backup_prproj.ps1` to its new home in the app. Useful when verifying parity with the existing script that this app replaces.
-- The original PowerShell script that this app is replacing was previously captured in `memo.md` (now emptied). Its behavior is fully reflected in `DESIGN.md` — prefer that source.
 
 ## Conventions for editing `DESIGN.md`
 

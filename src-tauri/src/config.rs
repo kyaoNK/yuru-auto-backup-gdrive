@@ -211,8 +211,8 @@ mod tests {
     fn save_then_load_roundtrip() {
         let (_tmp, store) = store_in_tmp();
         let cfg = Config {
-            source: Some(PathBuf::from("F:/src")),
-            destination: Some(PathBuf::from("G:/dest")),
+            source: Some(PathBuf::from("D:/src")),
+            destination: Some(PathBuf::from("E:/dest")),
             schedule_time: "14:30".into(),
             auto_start: false,
             last_summary: Some(JobSummary {
