@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Config, DriveCandidate, Status } from "./types";
+import type { Config, DeletionPreview, DriveCandidate, Status } from "./types";
 
 export const api = {
   getConfig: () => invoke<Config>("get_config"),
@@ -8,7 +8,8 @@ export const api = {
     invoke<string | null>("pick_folder", { startDir: startDir ?? null }),
   detectDriveRoots: () => invoke<DriveCandidate[]>("detect_drive_roots"),
   getStatus: () => invoke<Status>("get_status"),
-  runNow: () => invoke<void>("run_now"),
+  runNow: () => invoke<boolean>("run_now"),
+  previewDeletions: () => invoke<DeletionPreview>("preview_deletions"),
   listRecentLogs: (limit = 200) =>
     invoke<string[]>("list_recent_logs", { limit }),
   openAppDir: () => invoke<void>("open_app_dir"),

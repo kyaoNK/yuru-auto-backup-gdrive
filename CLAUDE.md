@@ -13,10 +13,10 @@ This repository contains a working Tauri v2 + Svelte 5 implementation. `DESIGN.m
 The design has already gone through several decision rounds — do not re-litigate decisions marked in `## 確定事項`. Examples of already-closed questions:
 
 - Target is **`.prproj` only**; do not add configurable extension lists.
-- Filter constants (`^\d{6}\(` regex, `Auto-Save` exclusion, 300-second Drive wait, `_Latest.prproj` suffix) are **hardcoded in source**, not in `config.json`. User-facing config is deliberately minimal: user-editable are only `source` / `destination` / `scheduleTime` / `autoStart` / `excludedFolders` / `excludedFolderNames`; `lastRunAt` / `lastSummary` are persisted state.
+- Filter constants (`^\d{6}\(` regex, `Auto-Save` exclusion, 300-second Drive wait, `_Latest.prproj` suffix) are **hardcoded in source**, not in `config.json`. User-facing config is deliberately minimal: user-editable are only `source` / `destination` / `scheduleTime` / `autoStart` / `excludedFolders` / `excludedFolderNames`; `lastRunAt` / `lastSummary` / `lastError` are persisted state.
 - **Resident mode only** — no CLI subcommands, no Task Scheduler integration.
 - Catch-up-on-startup is **always on** (not a toggle).
-- Config/logs live in `<exe_dir>/data/` with fallback to `%USERPROFILE%\yuru-auto-backup-gdrive\`. Do not use `%APPDATA%`.
+- Config/logs for installer-managed installs live in `%USERPROFILE%\yuru-auto-backup-gdrive\` so updates do not wipe settings. Manually placed portable builds may use `<exe_dir>/data/`. Do not use `%APPDATA%`.
 
 ## What the app does (one-paragraph summary)
 
@@ -24,7 +24,7 @@ Windows-only Tauri v2 desktop app. Once per day at a user-configured time, scans
 
 ## Architecture notes that span multiple components
 
-- **`AppDir::resolve()` is the entrypoint for all persistence.** Both `ConfigStore` and `Logger` must go through it. The portable-first / user-home-fallback logic lives in one place so installation layout is transparent to callers.
+- **`AppDir::resolve()` is the entrypoint for all persistence.** Both `ConfigStore` and `Logger` must go through it. The installer-vs-portable persistence logic lives in one place so update behavior is transparent to callers.
 - **Filter constants are shared between `BackupJob` and any future test fixtures.** They live in `backup.rs` (section 8.3 of `DESIGN.md`). If you add a test for filtering behavior, import the constants — don't redefine them.
 - **`DrivePathDetector` is best-effort and must never fail the user flow.** It returns a candidate list; the UI always falls back to a plain folder picker if detection yields zero results. Callers should treat empty results as normal, not as an error.
 - **Atomic copy is required** (`.part` → `rename`), not optional. The destination lives on a Drive-synced folder, and a partial file being picked up by the sync client would pollute the cloud copy.

@@ -21,6 +21,8 @@ chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 walkdir = "2"
 regex = "1"
+tempfile = "3"
+sha2 = "0.10"
 tokio = { version = "1", features = ["rt", "time", "sync"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-autostart = "2"
@@ -28,6 +30,3 @@ tauri-plugin-single-instance = "2"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
-
-[dev-dependencies]
-tempfile = "3"

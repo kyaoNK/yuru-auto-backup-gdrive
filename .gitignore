@@ -6,6 +6,7 @@ node_modules/
 /build/
 /package/
 /.svelte-kit/
+/test-results/
 /src-tauri/target/
 /src-tauri/gen/
 vite.config.js.timestamp-*

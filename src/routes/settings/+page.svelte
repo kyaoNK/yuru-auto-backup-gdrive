@@ -1,8 +1,12 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { api } from "$lib/api";
+  import { createAsyncScope } from "$lib/async-scope";
   import type { Config, DriveCandidate } from "$lib/types";
 
+  const scope = createAsyncScope();
+  let working = $state(false);
+  let savedSnapshot = $state("");
   let config = $state<Config | null>(null);
   let loading = $state(true);
   let saving = $state(false);
@@ -12,58 +16,77 @@
   let showCandidates = $state(false);
   let newExcludedName = $state("");
 
-  onMount(async () => {
+  async function load() {
+    const current = scope.ticket("config");
+    loading = true;
+    toast = null;
     try {
-      config = await api.getConfig();
-    } catch (e) {
-      toast = String(e);
-    } finally {
-      loading = false;
-    }
-  });
-
-  async function pickSource() {
-    if (!config) return;
-    const picked = await api.pickFolder(config.source ?? undefined);
-    if (picked) config.source = picked;
+      const loaded = await api.getConfig();
+      if (current()) { config = loaded; savedSnapshot = JSON.stringify(loaded); }
+    } catch (e) { if (current()) toast = String(e); }
+    finally { if (current()) loading = false; }
   }
 
-  async function pickDestination(startDir?: string) {
-    if (!config) return;
-    const picked = await api.pickFolder(startDir ?? config.destination ?? undefined);
-    if (picked) {
-      config.destination = picked;
-      showCandidates = false;
-    }
+  onMount(() => { void load(); return () => scope.dispose(); });
+
+  async function pickSource() { await pick("source"); }
+  async function pickDestination(startDir?: string) { await pick("destination", startDir); }
+  async function pick(target: "source" | "destination" | "exclude", startDir?: string) {
+    if (!config || working || saving) return;
+    working = true;
+    try {
+      const initial = startDir ?? (target === "destination" ? config.destination : config.source);
+      const picked = await api.pickFolder(initial ?? undefined);
+      if (!scope.active || !config || !picked) return;
+      if (target === "exclude") {
+        if (!config.excludedFolders.some(p => p.toLowerCase() === picked.toLowerCase()))
+          config.excludedFolders = [...config.excludedFolders, picked];
+      } else {
+        config[target] = picked;
+        if (target === "destination") showCandidates = false;
+      }
+    } catch (e) { if (scope.active) toast = `フォルダ選択に失敗: ${e}`; }
+    finally { if (scope.active) working = false; }
+  }
+
+  async function openAppDir() {
+    try { await api.openAppDir(); }
+    catch (e) { if (scope.active) toast = `設定フォルダを開けませんでした: ${e}`; }
   }
 
   async function detectDrives() {
+    if (detecting) return;
     detecting = true;
+    showCandidates = false;
+    driveCandidates = [];
     try {
-      driveCandidates = await api.detectDriveRoots();
+      const candidates = await api.detectDriveRoots();
+      if (!scope.active) return;
+      driveCandidates = candidates;
       if (driveCandidates.length === 0) {
         toast = "Google Drive が見つかりません。起動を確認してから手動で選んでください。";
       } else {
         showCandidates = true;
       }
     } catch (e) {
-      toast = String(e);
+      if (scope.active) toast = String(e);
     } finally {
-      detecting = false;
+      if (scope.active) detecting = false;
     }
   }
 
   async function save() {
-    if (!config) return;
+    if (!config || saving || working || detecting) return;
     saving = true;
     toast = null;
     try {
-      await api.updateConfig(config);
-      toast = "保存しました";
+      const snapshot = JSON.parse(JSON.stringify(config)) as Config;
+      await api.updateConfig(snapshot);
+      if (scope.active) { savedSnapshot = JSON.stringify(config); toast = "保存しました"; }
     } catch (e) {
-      toast = `保存に失敗: ${e}`;
+      if (scope.active) toast = String(e);
     } finally {
-      saving = false;
+      if (scope.active) saving = false;
     }
   }
 
@@ -76,14 +99,7 @@
     return hour >= 0 && hour <= 23 && minute >= 0 && minute <= 59;
   });
 
-  async function addExcludedFolder() {
-    if (!config) return;
-    const picked = await api.pickFolder(config.source ?? undefined);
-    if (!picked) return;
-    if (!config.excludedFolders.includes(picked)) {
-      config.excludedFolders = [...config.excludedFolders, picked];
-    }
-  }
+  async function addExcludedFolder() { await pick("exclude"); }
 
   function removeExcludedFolder(p: string) {
     if (!config) return;
@@ -94,6 +110,9 @@
     if (!config) return;
     const name = newExcludedName.trim();
     if (!name) return;
+    if (/[\\/]/.test(name) || name === "." || name === "..") {
+      toast = "除外名はパスではなくフォルダ名を指定してください。"; return;
+    }
     if (!config.excludedFolderNames.some((n) => n.toLowerCase() === name.toLowerCase())) {
       config.excludedFolderNames = [...config.excludedFolderNames, name];
     }
@@ -112,7 +131,10 @@
   {#if loading}
     <p class="text-sm text-slate-500">読み込み中…</p>
   {:else if config}
-    <div class="space-y-5">
+    {#if savedSnapshot && JSON.stringify(config) !== savedSnapshot}
+      <p role="status" class="text-sm text-amber-700 dark:text-amber-300">未保存の変更があります。画面を移動する前に保存してください。</p>
+    {/if}
+    <fieldset disabled={saving || working || detecting} class="space-y-5 min-w-0">
       <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 space-y-2">
         <label class="block text-sm font-medium" for="source">監視元フォルダ</label>
         <div class="flex gap-2">
@@ -122,7 +144,7 @@
             readonly
             value={config.source ?? ""}
             placeholder="フォルダを選択してください"
-            class="flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
+            class="min-w-0 flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
           />
           <button
             class="px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 text-sm"
@@ -140,7 +162,7 @@
             readonly
             value={config.destination ?? ""}
             placeholder="Google Drive 同期配下のフォルダを選択"
-            class="flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
+            class="min-w-0 flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
           />
           <button
             class="px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 text-sm"
@@ -172,6 +194,7 @@
             {/each}
           </ul>
         {/if}
+        <p class="text-xs text-slate-500">検出は候補の推測です。選択先が実際に Google Drive と同期されていることを確認してください。</p>
       </div>
 
       <div class="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-4 grid gap-4 sm:grid-cols-2">
@@ -239,7 +262,7 @@
                 <span class="font-mono">{n}</span>
                 <button
                   class="text-slate-500 hover:text-red-600"
-                  aria-label="削除"
+                  aria-label={`除外名 ${n} を削除`}
                   onclick={() => removeExcludedName(n)}
                 >×</button>
               </li>
@@ -253,8 +276,9 @@
             type="text"
             placeholder="例: Cache"
             bind:value={newExcludedName}
-            onkeydown={(e) => e.key === "Enter" && (e.preventDefault(), addExcludedName())}
-            class="flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
+            aria-label="追加する除外フォルダ名"
+            onkeydown={(e) => !e.isComposing && e.key === "Enter" && (e.preventDefault(), addExcludedName())}
+            class="min-w-0 flex-1 rounded-md border border-slate-300 dark:border-slate-600 bg-slate-50 dark:bg-slate-900 px-3 py-2 text-sm"
           />
           <button
             class="text-sm px-3 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700"
@@ -271,13 +295,17 @@
         >{saving ? "保存中…" : "保存"}</button>
         <button
           class="px-4 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 text-sm"
-          onclick={() => api.openAppDir()}
+          onclick={openAppDir}
         >設定フォルダを開く</button>
       </div>
-    </div>
+    </fieldset>
+  {:else}
+    <p class="text-sm">設定を読み込めませんでした。設定ファイルを確認して再読み込みしてください。</p>
+    <button class="underline" onclick={load}>再読み込み</button>
+    <button class="ml-3 underline" onclick={openAppDir}>設定フォルダを開く</button>
   {/if}
 
   {#if toast}
-    <div class="rounded-md bg-slate-900 text-white px-4 py-2 text-sm">{toast}</div>
+    <div role="status" class="break-words rounded-md bg-slate-900 text-white px-4 py-2 text-sm">{toast}</div>
   {/if}
 </section>

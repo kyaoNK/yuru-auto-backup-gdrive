@@ -9,6 +9,7 @@ use chrono::Local;
 pub struct Logger {
     path: PathBuf,
     file: Mutex<fs::File>,
+    last_error: Mutex<Option<String>>,
 }
 
 impl Logger {
@@ -23,6 +24,7 @@ impl Logger {
         Ok(Self {
             path: path.to_path_buf(),
             file: Mutex::new(file),
+            last_error: Mutex::new(None),
         })
     }
 
@@ -31,6 +33,7 @@ impl Logger {
     }
 
     pub fn tail(&self, limit: usize) -> io::Result<Vec<String>> {
+        let limit = limit.min(5000);
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -44,7 +47,7 @@ impl Logger {
         let mut newline_count = 0usize;
         const CHUNK_SIZE: u64 = 8192;
 
-        while pos > 0 && newline_count <= limit {
+        while pos > 0 && newline_count <= limit && bytes.len() < 1024 * 1024 {
             let read_len = CHUNK_SIZE.min(pos);
             pos -= read_len;
             file.seek(SeekFrom::Start(pos))?;
@@ -79,11 +82,25 @@ impl Logger {
     }
 
     fn write(&self, level: &str, msg: &str) {
+        let msg = msg.replace('\r', "\\r").replace('\n', "\\n");
         let ts = Local::now().format("%Y-%m-%dT%H:%M:%S%:z");
         let line = format!("[{ts}] [{level}] {msg}\n");
-        if let Ok(mut f) = self.file.lock() {
-            let _ = f.write_all(line.as_bytes());
+        let result = self
+            .file
+            .lock()
+            .map_err(|_| io::Error::other("logger lock poisoned"))
+            .and_then(|mut file| file.write_all(line.as_bytes()));
+        if let Err(err) = result {
+            *self.last_error.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(format!("ログを書き込めません: {err}"));
         }
+    }
+
+    pub fn last_error(&self) -> Option<String> {
+        self.last_error
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -91,6 +108,32 @@ impl Logger {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn escapes_multiline_messages_and_surfaces_write_errors() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("log");
+        let logger = Logger::open(&path).unwrap();
+        logger.info("one\n[ERROR] fake\rline");
+        assert_eq!(fs::read_to_string(&path).unwrap().lines().count(), 1);
+        let failed = Logger {
+            path: path.clone(),
+            file: Mutex::new(fs::File::open(&path).unwrap()),
+            last_error: Mutex::new(None),
+        };
+        failed.info("cannot write to read-only handle");
+        assert!(failed.last_error().is_some());
+    }
+
+    #[test]
+    fn bounds_tail_of_a_single_huge_line() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("log");
+        fs::write(&path, vec![b'x'; 2 * 1024 * 1024]).unwrap();
+        let logger = Logger::open(&path).unwrap();
+        let lines = logger.tail(usize::MAX).unwrap();
+        assert!(lines.iter().map(String::len).sum::<usize>() <= 1024 * 1024);
+    }
 
     #[test]
     fn open_creates_parent_directory_and_file() {
@@ -150,6 +193,7 @@ mod tests {
         let logger = Logger {
             path: tmp.path().join("missing.log"),
             file: std::sync::Mutex::new(fs::File::create(tmp.path().join("other.log")).unwrap()),
+            last_error: Mutex::new(None),
         };
         let tail = logger.tail(5).unwrap();
         assert!(tail.is_empty());

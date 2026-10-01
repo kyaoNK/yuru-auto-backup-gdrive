@@ -95,12 +95,25 @@ fn from_registry() -> Vec<DriveCandidate> {
                 continue;
             };
             let path = PathBuf::from(raw);
-            if path.is_dir() {
-                out.push(DriveCandidate {
-                    path,
-                    label: val_name,
-                    source: DetectionSource::Registry,
-                });
+            if !path.is_absolute() {
+                continue;
+            }
+            let candidates = std::iter::once(path.clone())
+                .chain(DRIVE_FOLDER_NAMES.iter().map(|name| path.join(name)));
+            for path in candidates.filter(|p| {
+                p.file_name().is_some_and(|name| {
+                    DRIVE_FOLDER_NAMES
+                        .iter()
+                        .any(|expected| name.to_string_lossy().eq_ignore_ascii_case(expected))
+                })
+            }) {
+                if path.is_dir() {
+                    out.push(DriveCandidate {
+                        path,
+                        label: val_name.clone(),
+                        source: DetectionSource::Registry,
+                    });
+                }
             }
         }
     }
@@ -109,8 +122,16 @@ fn from_registry() -> Vec<DriveCandidate> {
 
 pub fn dedup_existing(mut items: Vec<DriveCandidate>) -> Vec<DriveCandidate> {
     items.retain(|c| c.path.is_dir());
-    let mut seen: HashSet<PathBuf> = HashSet::new();
-    items.retain(|c| seen.insert(c.path.clone()));
+    let mut seen = HashSet::new();
+    items.retain(|c| {
+        let path = std::fs::canonicalize(&c.path).unwrap_or_else(|_| c.path.clone());
+        let key = path.to_string_lossy().into_owned();
+        seen.insert(if cfg!(windows) {
+            key.to_lowercase()
+        } else {
+            key
+        })
+    });
     items
 }
 

@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ const POLL_INTERVAL: Duration = Duration::from_secs(10);
 pub enum DriveWaitError {
     #[error("destination directory never appeared: {0}")]
     Timeout(PathBuf),
+    #[error("backup wait cancelled during shutdown")]
+    Cancelled,
 }
 
 pub fn wait_for_destination(destination: &Path) -> Result<(), DriveWaitError> {
@@ -27,15 +30,39 @@ pub fn wait_with(
     timeout: Duration,
     interval: Duration,
 ) -> Result<(), DriveWaitError> {
+    wait_cancellable(destination, timeout, interval, &AtomicBool::new(false))
+}
+
+pub fn wait_cancellable(
+    destination: &Path,
+    timeout: Duration,
+    interval: Duration,
+    stopping: &AtomicBool,
+) -> Result<(), DriveWaitError> {
     let start = Instant::now();
     loop {
-        if destination.exists() {
+        if stopping.load(Ordering::SeqCst) {
+            return Err(DriveWaitError::Cancelled);
+        }
+        if destination.is_dir() {
             return Ok(());
         }
         if start.elapsed() >= timeout {
             return Err(DriveWaitError::Timeout(destination.to_path_buf()));
         }
-        thread::sleep(interval);
+        let remaining = timeout.saturating_sub(start.elapsed());
+        let pause = remaining.min(interval.max(Duration::from_millis(1)));
+        let poll_end = Instant::now() + pause;
+        while Instant::now() < poll_end {
+            if stopping.load(Ordering::SeqCst) {
+                return Err(DriveWaitError::Cancelled);
+            }
+            thread::sleep(
+                poll_end
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(100)),
+            );
+        }
     }
 }
 
@@ -45,6 +72,30 @@ mod tests {
     use std::fs;
     use std::sync::mpsc;
     use tempfile::tempdir;
+
+    #[test]
+    fn rejects_file_and_does_not_sleep_past_deadline() {
+        let tmp = tempdir().unwrap();
+        let file = tmp.path().join("not-a-folder");
+        fs::write(&file, "file").unwrap();
+        let start = Instant::now();
+        assert!(wait_with(&file, Duration::from_millis(30), Duration::from_secs(10)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn shutdown_cancels_wait_without_poll_delay() {
+        let stop = AtomicBool::new(true);
+        assert!(matches!(
+            wait_cancellable(
+                Path::new("missing"),
+                Duration::from_secs(300),
+                Duration::from_secs(10),
+                &stop
+            ),
+            Err(DriveWaitError::Cancelled)
+        ));
+    }
 
     #[test]
     fn returns_ok_immediately_when_destination_exists() {
