@@ -64,6 +64,13 @@
 | `msi/yuru-auto-backup-gdrive_0.1.0_x64_en-US.msi` | 4214784 | `0654349E98A239D5EC0E5D772A5B637BE6BFF36CC485C00BE7ED2C8FB8DABCEA` |
 | `nsis/yuru-auto-backup-gdrive_0.1.0_x64-setup.exe` | 2779205 | `D94C3C2D6EED39E3E7FBCD54A9A638B10ED5DDF42F63D0456BFBC5CB6FA5BFB5` |
 
+### v0.2.0 配布準備（2026-10-01）
+
+- npm／Cargo／Tauri とロックファイルの製品バージョンを `0.2.0` に統一。
+- 制限環境では MSI の `light.exe` が失敗したが、権限付きの `npm run tauri build -- --verbose` で MSI／NSIS とも生成成功（終了コード0）。
+- WiX の ICE03（WebView2 bootstrapper の CustomAction 文字列長）等の警告あり。インストール動作は未検証。
+- `RELEASE_NOTES.md` に保持期限・削除同期・更新前の退避・未署名／未検証事項を明記。配布用 SHA256SUMS を生成。
+
 ### 実環境で残る確認
 
 - Tauri ネイティブのトレイ操作／終了／エラーダイアログと Windows 自動起動の実登録。
