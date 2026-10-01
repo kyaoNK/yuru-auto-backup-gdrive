@@ -13,14 +13,14 @@ This repository contains a working Tauri v2 + Svelte 5 implementation. `DESIGN.m
 The design has already gone through several decision rounds — do not re-litigate decisions marked in `## 確定事項`. Examples of already-closed questions:
 
 - Target is **`.prproj` only**; do not add configurable extension lists.
-- Filter constants (`^\d{6}\(` regex, `Auto-Save` exclusion, 300-second Drive wait, `_Latest.prproj` suffix) are **hardcoded in source**, not in `config.json`. User-facing config is deliberately minimal: user-editable are only `source` / `destination` / `scheduleTime` / `autoStart` / `excludedFolders` / `excludedFolderNames`; `lastRunAt` / `lastSummary` / `lastError` are persisted state.
+- Filter constants (`Auto-Save` exclusion, 300-second Drive wait, `_Latest.prproj` suffix) are **hardcoded in source**, not in `config.json`. User-facing config is deliberately minimal: user-editable are only `source` / `destination` / `scheduleTime` / `autoStart` / `excludedFolders` / `excludedFolderNames`; `lastRunAt` / `lastSummary` / `lastError` are persisted state.
 - **Resident mode only** — no CLI subcommands, no Task Scheduler integration.
 - Catch-up-on-startup is **always on** (not a toggle).
 - Config/logs for installer-managed installs live in `%USERPROFILE%\yuru-auto-backup-gdrive\` so updates do not wipe settings. Manually placed portable builds may use `<exe_dir>/data/`. Do not use `%APPDATA%`.
 
 ## What the app does (one-paragraph summary)
 
-Windows-only Tauri v2 desktop app. Once per day at a user-configured time, scans a source folder for `.prproj` files under folders whose name matches `^\d{6}\(`, excludes anything under `Auto-Save`, and copies each match to a Google Drive-synced destination folder as `<BaseName>_Latest.prproj` (flat, overwriting). Google Drive for desktop handles the actual cloud upload. If the destination path isn't visible yet (Drive not started), it polls for up to 5 minutes before giving up. If the PC was off at the scheduled time, the next launch runs it immediately.
+Windows-only Tauri v2 desktop app. Once per day at a user-configured time, scans a source folder for `.prproj` files regardless of folder/file naming (including the source root), excludes anything under `Auto-Save`, and copies each match to a Google Drive-synced destination folder as `<BaseName>_Latest.prproj` (flat, overwriting). Google Drive for desktop handles the actual cloud upload. If the destination path isn't visible yet (Drive not started), it polls for up to 5 minutes before giving up. If the PC was off at the scheduled time, the next launch runs it immediately.
 
 ## Architecture notes that span multiple components
 

@@ -28,8 +28,7 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 
 - 拡張子: `.prproj` のみ
 - 監視元フォルダ配下を**再帰的**に探索
-- フォルダ名条件: 祖先パスのいずれかのフォルダ名が正規表現 `^\d{6}\(` にマッチする必要がある（例: `250304(3)_Project`）
-  - 既存スクリプトの `FullName -match "\\\d{6}\("` に相当
+- フォルダ・ファイル名の条件なし。監視元直下も対象。
 
 ### 4.2 除外条件
 
@@ -37,7 +36,7 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 - 加えて、以下の**ユーザー設定による追加除外**を適用する（どちらも空でも可）:
   - `excludedFolders`: 絶対パスのリスト。ファイルの祖先パスのいずれかがこのリストのいずれかと一致すれば除外（= そのフォルダ配下のサブツリーを丸ごと除外）
   - `excludedFolderNames`: フォルダ名のリスト。ファイルの祖先フォルダ名のいずれかがこのリストのいずれか（大文字小文字を区別しない）と一致すれば除外（例: `Proxy`, `Cache`）
-- 上記のいずれか 1 つにでも該当したファイルは対象外。ハードコードされた `Auto-Save` 除外と `^\d{6}\(` 必須条件は**そのまま固定**で、これらと独立・追加で適用される。
+- 上記のいずれか 1 つにでも該当したファイルは対象外。ハードコードされた `Auto-Save` 除外は**そのまま固定**で、これらと独立・追加で適用される。
 
 ### 4.3 出力先・命名規則
 
@@ -124,7 +123,6 @@ Premiere Pro のプロジェクトファイル (`.prproj`) を、毎日 1 回の
 ```rust
 const TARGET_EXTENSION: &str = "prproj";
 const EXCLUDE_PATH_KEYWORD: &str = "Auto-Save";
-const FOLDER_NAME_REGEX: &str = r"^\d{6}\(";
 const DRIVE_WAIT_SECONDS: u64 = 300;
 const BACKUP_SUFFIX: &str = "_Latest.prproj";
 const RETENTION_MONTHS: u32 = 2;
@@ -155,13 +153,11 @@ Google Drive for desktop の同期ルート（例: `G:\My Drive`、`G:\Shared dr
 fn run(cfg: &Config) -> JobSummary {
     DriveWaiter::wait(&cfg.destination, Duration::from_secs(DRIVE_WAIT_SECONDS))?;
 
-    let folder_re = Regex::new(FOLDER_NAME_REGEX).unwrap();
     let mut summary = JobSummary::default();
 
     for entry in walkdir(&cfg.source) {
         if entry.extension() != Some(TARGET_EXTENSION) { continue; }
         if entry.path().contains(EXCLUDE_PATH_KEYWORD) { continue; }
-        if !ancestor_matches(&entry, &folder_re) { continue; }
 
         let dest_name = format!("{}{}", entry.file_stem(), BACKUP_SUFFIX);
         let dest = cfg.destination.join(dest_name);
@@ -214,7 +210,7 @@ fn run(cfg: &Config) -> JobSummary {
 }
 ```
 
-9 項目（編集可能な6項目＋実行状態3項目）。`lastError` は旧設定では未指定でも読み込める。ハードコードされた `Auto-Save` 除外と `^\d{6}\(` 必須は 8.3 の定数で維持しつつ、ユーザーが現場の運用で追加したい除外（例: `Proxy` / `Cache` / `Render`）はここで持つ。挙動を規定する他のパラメータ（対象拡張子・Drive 待機秒数・`_Latest.prproj` サフィックス）は 8.3 の定数のまま変更不可。
+9 項目（編集可能な6項目＋実行状態3項目）。`lastError` は旧設定では未指定でも読み込める。ハードコードされた `Auto-Save` 除外は 8.3 の定数で維持しつつ、ユーザーが現場の運用で追加したい除外（例: `Proxy` / `Cache` / `Render`）はここで持つ。挙動を規定する他のパラメータ（対象拡張子・Drive 待機秒数・`_Latest.prproj` サフィックス）は 8.3 の定数のまま変更不可。
 
 ### 8.7 Logger
 - `<AppDir>/logs/backup.log` へ追記。1 日 1 ジョブなのでローテーションは行わず単一ファイル（必要に応じて手動削除）。
@@ -261,7 +257,7 @@ Scheduler 発火
   → DriveWaiter で destination が見えるまで最大 5 分リトライ
       ├─ タイムアウト: ログに記録して終了（次回まで待機）
       └─ 可視: BackupJob 開始
-          → source を再帰スキャン → 拡張子／Auto-Save／フォルダ名正規表現でフィルタ
+          → source を再帰スキャン → 拡張子／Auto-Save／ユーザー除外でフィルタ
           → 各対象: <BaseName>_Latest.prproj として原子的コピー（上書き）
           → 完了: lastRunAt / lastSummary 更新、ログ追記、UI 通知
 ```
@@ -332,7 +328,7 @@ yuru-auto-backup-gdrive/
 
 ## 13. 主要依存クレート / ライブラリ
 
-- Rust: `tauri`, `serde` + `serde_json`, `tokio`, `walkdir`, `regex`, `chrono`, `tauri-plugin-autostart`, `tauri-plugin-dialog`, `tauri-plugin-opener`
+- Rust: `tauri`, `serde` + `serde_json`, `tokio`, `walkdir`, `chrono`, `tauri-plugin-autostart`, `tauri-plugin-dialog`, `tauri-plugin-opener`
 - フロント: `@tauri-apps/api`, Svelte 5 / SvelteKit / Tailwind CSS
 
 ## 14. 実装ステップ
@@ -350,7 +346,7 @@ yuru-auto-backup-gdrive/
 11. 動作確認:
     - `.prproj` 以外が除外されること
     - `Auto-Save` 配下が除外されること
-    - `^\d{6}\(` 条件を満たすフォルダ配下のみコピーされること
+    - 名前に関係なく監視元直下・サブフォルダからコピーされること
     - 出力ファイル名が `_Latest.prproj` で上書きされること
     - Google Drive 停止状態で起動 → 5 分以内に起動した場合にコピーされること
     - PC スリープ後の起動で取りこぼしが実行されること
@@ -366,7 +362,7 @@ yuru-auto-backup-gdrive/
 | `while (!(Test-Path $DEST) ...)` | `DriveWaiter`（`DRIVE_WAIT_SECONDS=300` で固定） |
 | `Get-ChildItem -Filter *.prproj -Recurse` | `walkdir` + `TARGET_EXTENSION="prproj"` |
 | `$_.FullName -notmatch "Auto-Save"` | `EXCLUDE_PATH_KEYWORD="Auto-Save"`（ハードコード） + `config.excludedFolders` / `config.excludedFolderNames`（ユーザー設定） |
-| `$_.FullName -match "\\\d{6}\("` | `FOLDER_NAME_REGEX=r"^\d{6}\("` |
+| `$_.FullName -match "\\\d{6}\("` | 撤廃：名前条件なし |
 | `$_.BaseName + "_Latest.prproj"` | `BACKUP_SUFFIX="_Latest.prproj"` |
 | `Copy-Item -Force` | 原子的コピー（`.part` → rename） |
 | `New-ScheduledTaskTrigger -Daily -At 9:00AM` | `Scheduler`（`config.scheduleTime`、既定 09:00） |
@@ -374,6 +370,8 @@ yuru-auto-backup-gdrive/
 | `Unregister-ScheduledTask` | アプリアンインストールで完結（タスク登録を使わないため） |
 
 ## 16. 確定事項
+
+- **名前条件撤廃（2026-10-01）**: 数字6桁＋括弧の祖先フォルダ条件を廃止。ファイル名も自由。拡張子・除外・2ヶ月保持・平置き出力は維持。
 
 - **元ファイル不在の整理（2026-10-01）**: 元が存在する期限切れは従来どおり自動削除。不在は正常に完走したバックアップで初めて確認した日時から暦2ヶ月保留し、その後も自動削除せず、一覧から1件ずつ明示確認して削除する。プレビューでは保留開始日時を更新しない。復帰・同名ファイルの移動検出で保留を解除。監視元不通・走査エラーでは不在を記録せず確認削除も拒否する。監視元／出力先／除外設定が記録時と異なるもの、旧管理記録、リンク、外部変更されたバックアップは保護して理由を表示する。除外先も移動検出のため読み取り走査し、同名ファイルを見つけた場合は安全側に保護する。監視範囲外への移動や改名は削除と区別できないため、最後のコピーを失う可能性を確認画面で警告する。
 
@@ -392,6 +390,6 @@ yuru-auto-backup-gdrive/
 - **起動方式は常駐のみ**。CLI サブコマンドは持たず、UI 経由の操作に統一する。
 - **スリープ時の取りこぼし**: 定時に PC がオフ／スリープだった場合、次回起動時に即時実行する（常時有効）。
 - **Drive フォルダパス選択**: 自動検出した同期ルートをフォルダ選択ダイアログの起点にする方式（`DrivePathDetector`）。検出失敗時は通常のフォルダ選択ダイアログにフォールバック。
-- **挙動を規定するパラメータはソース固定**: 対象拡張子・`Auto-Save` 除外・`^\d{6}\(` 正規表現・Drive 待機 300 秒・`_Latest.prproj` サフィックスは 8.3 の定数として持ち、`config.json` には含めない。変更したい場合はソース改修。
+- **挙動を規定するパラメータはソース固定**: 対象拡張子・`Auto-Save` 除外・Drive 待機 300 秒・`_Latest.prproj` サフィックスは 8.3 の定数として持ち、`config.json` には含めない。変更したい場合はソース改修。
 - **ユーザー設定の追加除外（2026-04-24 追加）**: 上記の固定条件は維持しつつ、`excludedFolders`（絶対パス）と `excludedFolderNames`（名前パターン、大文字小文字無視）を `config.json` に追加。現場運用で都度変わる除外（`Proxy` / `Cache` / 特定プロジェクト配下の一部など）を UI から編集できるようにする。どちらも空配列でも可。
 - **設定ファイルの保存先**: インストーラー版は更新時にインストール先が作り直されても消えないよう `%USERPROFILE%\yuru-auto-backup-gdrive\` に置く。手動配置のポータブル版のみ、実行ファイルと同じディレクトリ配下の `data/` に `config.json` と `logs/backup.log` を保持する。
