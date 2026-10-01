@@ -10,6 +10,7 @@ export const api = {
   getStatus: () => invoke<Status>("get_status"),
   runNow: () => invoke<boolean>("run_now"),
   previewDeletions: () => invoke<DeletionPreview>("preview_deletions"),
+  deleteOrphanBackup: (name: string, token: string) => invoke<void>("delete_orphan_backup", { name, token }),
   listRecentLogs: (limit = 200) =>
     invoke<string[]>("list_recent_logs", { limit }),
   openAppDir: () => invoke<void>("open_app_dir"),

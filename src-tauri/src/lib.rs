@@ -293,6 +293,7 @@ pub fn run() {
             commands::get_status,
             commands::run_now,
             commands::preview_deletions,
+            commands::delete_orphan_backup,
             commands::list_recent_logs,
             commands::open_app_dir,
         ])

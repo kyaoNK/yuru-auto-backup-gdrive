@@ -1,7 +1,8 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::time::SystemTime;
 
 use crate::atomic_file;
@@ -19,14 +20,19 @@ pub const BACKUP_SUFFIX: &str = "_Latest.prproj";
 pub const DRIVE_WAIT_SECONDS: u64 = 300;
 pub const RETENTION_MONTHS: u32 = 2;
 const MANIFEST_NAME: &str = ".yuru-backup-manifest.json";
+pub(crate) static BACKUP_IO: Mutex<()> = Mutex::new(());
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManagedBackup {
     source: PathBuf,
     size: u64,
     modified: SystemTime,
     #[serde(default)]
     sha256: Option<String>,
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    missing_since: Option<DateTime<Local>>,
 }
 
 type Manifest = BTreeMap<String, ManagedBackup>;
@@ -47,6 +53,8 @@ fn fingerprint(path: &Path, source: &Path) -> io::Result<ManagedBackup> {
         size: metadata.len(),
         modified: metadata.modified()?,
         sha256: Some(hash_file(path)?),
+        scope: None,
+        missing_since: None,
     })
 }
 
@@ -81,6 +89,19 @@ pub struct JobOutcome {
     pub deleted_files: Vec<PathBuf>,
     pub expired_files: Vec<PathBuf>,
     pub retained_files: Vec<PathBuf>,
+    pub orphans: Vec<OrphanBackup>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct OrphanBackup {
+    pub name: String,
+    pub backup: PathBuf,
+    pub source: PathBuf,
+    pub missing_since: Option<DateTime<Local>>,
+    pub eligible_at: Option<DateTime<Local>>,
+    pub reason: String,
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -90,6 +111,7 @@ pub struct DeletionPreview {
     pub candidates: Vec<PathBuf>,
     pub retained: Vec<PathBuf>,
     pub errors: Vec<(PathBuf, String)>,
+    pub orphans: Vec<OrphanBackup>,
 }
 
 pub struct BackupJob {
@@ -120,6 +142,7 @@ impl BackupJob {
     }
 
     pub fn run(&self) -> Result<JobOutcome, BackupError> {
+        let _guard = BACKUP_IO.lock().unwrap_or_else(|e| e.into_inner());
         self.run_at(Local::now())
     }
 
@@ -128,6 +151,7 @@ impl BackupJob {
     }
 
     pub fn preview_deletions(&self) -> Result<DeletionPreview, BackupError> {
+        let _guard = BACKUP_IO.lock().unwrap_or_else(|e| e.into_inner());
         self.preview_at(Local::now())
     }
 
@@ -138,6 +162,7 @@ impl BackupJob {
             candidates: outcome.deleted_files,
             retained: outcome.retained_files,
             errors: outcome.errored_files,
+            orphans: outcome.orphans,
         })
     }
 
@@ -275,7 +300,9 @@ impl BackupJob {
                 copy_atomic(path, &dest)?;
                 outcome.summary.copied += 1;
                 outcome.copied_files.push(path.to_path_buf());
-                manifest.insert(dest_name, fingerprint(&dest, path)?);
+                let mut record = fingerprint(&dest, path)?;
+                record.scope = Some(self.scope_key()?);
+                manifest.insert(dest_name, record);
                 manifest_changed = true;
                 Ok(())
             })();
@@ -287,6 +314,21 @@ impl BackupJob {
             }
         }
 
+        // Only a fully successful scan may advance missing-source tracking.
+        if outcome.summary.errors == 0 {
+            match self.inspect_orphans(&mut manifest, now, !preview) {
+                Ok((orphans, changed)) => {
+                    outcome.orphans = orphans;
+                    manifest_changed |= changed;
+                }
+                Err(err) => {
+                    outcome.summary.errors += 1;
+                    outcome
+                        .errored_files
+                        .push((self.source.clone(), err.to_string()));
+                }
+            }
+        }
         if manifest_changed {
             let result = (|| -> io::Result<()> {
                 let bytes = serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?;
@@ -300,6 +342,206 @@ impl BackupJob {
 
         Ok(outcome)
     }
+}
+
+impl BackupJob {
+    fn scope_key(&self) -> io::Result<String> {
+        let mut folders: Vec<_> = self.excluded_folders.iter().map(|p| path_key(p)).collect();
+        let mut names: Vec<_> = self
+            .excluded_folder_names
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        folders.sort();
+        names.sort();
+        let bytes = serde_json::to_vec(&(
+            path_key(&fs::canonicalize(&self.source)?),
+            path_key(&fs::canonicalize(&self.destination)?),
+            folders,
+            names,
+        ))
+        .map_err(io::Error::other)?;
+        Ok(format!("{:x}", Sha256::digest(bytes)))
+    }
+
+    fn inspect_orphans(
+        &self,
+        manifest: &mut Manifest,
+        now: DateTime<Local>,
+        update: bool,
+    ) -> io::Result<(Vec<OrphanBackup>, bool)> {
+        if manifest.is_empty() {
+            return Ok((Vec::new(), false));
+        }
+        let scope = self.scope_key()?;
+        if !self.source.is_dir() || !self.destination.is_dir() {
+            return Err(io::Error::other("監視元または出力先を確認できません"));
+        }
+        // Include excluded folders: a move there must not be mistaken for deletion.
+        let mut filenames = HashSet::new();
+        for entry in WalkDir::new(&self.source)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|e| !paths_equal_for_exclusion(e.path(), &self.destination))
+        {
+            let entry = entry.map_err(io::Error::other)?;
+            if entry.file_type().is_symlink() {
+                return Err(io::Error::other(
+                    "リンクを含むため元ファイル不在を安全に判定できません",
+                ));
+            }
+            if entry.file_type().is_file() {
+                filenames.insert(entry.file_name().to_string_lossy().to_lowercase());
+            }
+        }
+        let root = fs::canonicalize(&self.source)?;
+        let mut next = manifest.clone();
+        let mut result = Vec::new();
+        let mut changed = false;
+        let re = Regex::new(FOLDER_NAME_REGEX).expect("valid regex");
+        let names: Vec<_> = self
+            .excluded_folder_names
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .collect();
+        for (name, record) in &mut next {
+            if !valid_backup_name(name) {
+                return Err(io::Error::other("管理記録に不正なバックアップ名があります"));
+            }
+            let exists = match fs::symlink_metadata(&record.source) {
+                Ok(_) => true,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => false,
+                Err(e) => return Err(e),
+            };
+            let same_scope = record.scope.as_deref() == Some(&scope)
+                && record
+                    .source
+                    .ancestors()
+                    .any(|p| paths_equal_for_exclusion(p, &root));
+            let moved = record
+                .source
+                .file_name()
+                .is_some_and(|s| filenames.contains(&s.to_string_lossy().to_lowercase()));
+            if exists || moved || !same_scope {
+                if record.missing_since.take().is_some() {
+                    changed |= update;
+                }
+                // Existing eligible sources are already represented by the automatic preview.
+                if exists
+                    && same_scope
+                    && should_backup(&record.source, &re, &self.excluded_folders, &names)
+                {
+                    continue;
+                }
+            } else if update && record.missing_since.is_none() {
+                record.missing_since = Some(now);
+                changed = true;
+            }
+            let eligible_at = record
+                .missing_since
+                .and_then(|t| t.checked_add_months(Months::new(RETENTION_MONTHS)));
+            let backup = self.destination.join(name);
+            let mut ready = false;
+            let reason = if !same_scope {
+                "設定変更または旧管理記録のため保護"
+            } else if exists || moved {
+                "元ファイルが存在・移動・除外された可能性があるため保護"
+            } else if !backup_matches(&backup, record)? {
+                "バックアップが不在・外部変更・旧形式のため保護"
+            } else if eligible_at.is_some_and(|t| now >= t) {
+                ready = true;
+                "2ヶ月保留済み：確認して削除できます"
+            } else {
+                "元ファイル不在：2ヶ月保留（開始は正常なバックアップ実行時）"
+            };
+            let token = if ready {
+                Some(record_token(record)?)
+            } else {
+                None
+            };
+            result.push(OrphanBackup {
+                name: name.clone(),
+                backup,
+                source: record.source.clone(),
+                missing_since: record.missing_since,
+                eligible_at,
+                reason: reason.into(),
+                token,
+            });
+        }
+        if update {
+            *manifest = next;
+        }
+        Ok((result, changed))
+    }
+
+    // Caller holds BACKUP_IO, also shared with settings updates and automatic jobs.
+    pub(crate) fn confirm_orphan_deletion(&self, name: &str, token: &str) -> io::Result<()> {
+        self.confirm_orphan_at(name, token, Local::now())
+    }
+
+    fn confirm_orphan_at(&self, name: &str, token: &str, now: DateTime<Local>) -> io::Result<()> {
+        if !valid_backup_name(name) {
+            return Err(io::Error::other("不正なバックアップ名です"));
+        }
+        let manifest_path = self.destination.join(MANIFEST_NAME);
+        let mut manifest: Manifest =
+            serde_json::from_slice(&fs::read(&manifest_path)?).map_err(io::Error::other)?;
+        let (items, _) = self.inspect_orphans(&mut manifest, now, false)?;
+        if !items
+            .iter()
+            .any(|item| item.name == name && item.token.as_deref() == Some(token))
+        {
+            return Err(io::Error::other(
+                "削除条件が変わりました。一覧を再確認してください",
+            ));
+        }
+        let record = manifest
+            .get(name)
+            .ok_or_else(|| io::Error::other("管理記録がありません"))?;
+        // Recheck immediately before deletion; never accept a path supplied by the UI.
+        match fs::symlink_metadata(&record.source) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            _ => return Err(io::Error::other("元ファイルの不在を確認できません")),
+        }
+        let dest = self.destination.join(name);
+        if !backup_matches(&dest, record)? {
+            return Err(io::Error::other("バックアップが変更されました"));
+        }
+        fs::remove_file(dest)?;
+        manifest.remove(name);
+        atomic_file::write(
+            &manifest_path,
+            &serde_json::to_vec_pretty(&manifest).map_err(io::Error::other)?,
+        )
+        .map_err(|e| io::Error::other(format!("削除済みですが管理記録の保存に失敗しました: {e}")))
+    }
+}
+
+fn valid_backup_name(name: &str) -> bool {
+    !name.contains(['/', '\\', ':'])
+        && name.ends_with(BACKUP_SUFFIX)
+        && Path::new(name).components().count() == 1
+}
+
+fn record_token(record: &ManagedBackup) -> io::Result<String> {
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(record).map_err(io::Error::other)?)
+    ))
+}
+
+fn backup_matches(path: &Path, record: &ManagedBackup) -> io::Result<bool> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    Ok(metadata.file_type().is_file()
+        && metadata.len() == record.size
+        && metadata.modified()? == record.modified
+        && record.sha256.is_some()
+        && Some(hash_file(path)?) == record.sha256)
 }
 
 pub fn should_backup(
@@ -603,6 +845,161 @@ mod tests {
             assert!(job.preview_at(date(4, 1)).unwrap().candidates.is_empty());
             assert!(job.run_at(date(4, 1)).unwrap().deleted_files.is_empty());
             assert_eq!(fs::read(output).unwrap(), contents);
+        }
+
+        #[test]
+        fn missing_is_tracked_only_by_run_and_requires_confirmation_after_two_months() {
+            let (_tmp, job, source, output) = fixture();
+            job.run_at(date(2, 1)).unwrap();
+            fs::remove_file(&source).unwrap();
+            let before = fs::read(job.destination.join(MANIFEST_NAME)).unwrap();
+            let preview = job.preview_at(date(2, 28)).unwrap();
+            assert!(preview.orphans[0].missing_since.is_none());
+            assert_eq!(
+                before,
+                fs::read(job.destination.join(MANIFEST_NAME)).unwrap()
+            );
+            job.run_at(date(2, 28)).unwrap();
+            let early = job.preview_at(date(4, 27)).unwrap();
+            assert!(early.orphans[0].token.is_none());
+            let ready = job.preview_at(date(4, 28)).unwrap();
+            let item = &ready.orphans[0];
+            let token = item.token.as_ref().unwrap();
+            assert_eq!(item.missing_since, Some(date(2, 28)));
+            assert!(job
+                .confirm_orphan_at(&item.name, token, date(4, 27))
+                .is_err());
+            assert!(job.run_at(date(5, 1)).unwrap().deleted_files.is_empty());
+            assert!(output.exists());
+            job.confirm_orphan_at(&item.name, token, date(5, 1))
+                .unwrap();
+            assert!(!output.exists());
+            assert!(job
+                .confirm_orphan_at(&item.name, token, date(5, 1))
+                .is_err());
+        }
+
+        #[test]
+        fn restored_or_moved_source_invalidates_confirmation() {
+            let (_tmp, job, source, output) = fixture();
+            job.run_at(date(2, 1)).unwrap();
+            let contents = fs::read(&source).unwrap();
+            fs::remove_file(&source).unwrap();
+            job.run_at(date(2, 2)).unwrap();
+            let item = job.preview_at(date(4, 2)).unwrap().orphans.remove(0);
+            fs::write(&source, &contents).unwrap();
+            assert!(job
+                .confirm_orphan_at(&item.name, item.token.as_ref().unwrap(), date(4, 2))
+                .is_err());
+            let moved = job.source.join("excluded").join("main.prproj");
+            fs::create_dir_all(moved.parent().unwrap()).unwrap();
+            fs::rename(&source, &moved).unwrap();
+            assert!(job
+                .confirm_orphan_at(&item.name, item.token.as_ref().unwrap(), date(4, 2))
+                .is_err());
+            job.run_at(date(4, 2)).unwrap();
+            assert!(job.preview_at(date(4, 2)).unwrap().orphans[0]
+                .missing_since
+                .is_none());
+            fs::remove_file(moved).unwrap();
+            job.run_at(date(4, 3)).unwrap();
+            assert!(job.preview_at(date(4, 4)).unwrap().orphans[0]
+                .token
+                .is_none());
+            assert!(output.exists());
+        }
+
+        #[test]
+        fn changed_config_content_and_offline_source_block_confirmation() {
+            let (_tmp, job, source, output) = fixture();
+            job.run_at(date(2, 1)).unwrap();
+            fs::remove_file(source).unwrap();
+            job.run_at(date(2, 2)).unwrap();
+            let item = job.preview_at(date(4, 2)).unwrap().orphans.remove(0);
+            let token = item.token.unwrap();
+            let changed = BackupJob::new(&job.source, &job.destination)
+                .with_excluded_folder_names(vec!["Cache".into()]);
+            assert!(changed
+                .confirm_orphan_at(&item.name, &token, date(4, 2))
+                .is_err());
+            let offline = job.source.with_file_name("offline");
+            fs::rename(&job.source, &offline).unwrap();
+            assert!(job
+                .confirm_orphan_at(&item.name, &token, date(4, 2))
+                .is_err());
+            fs::rename(&offline, &job.source).unwrap();
+            fs::write(&output, "external change").unwrap();
+            assert!(job
+                .confirm_orphan_at(&item.name, &token, date(4, 2))
+                .is_err());
+            assert!(output.exists());
+            assert!(job
+                .confirm_orphan_at("../outside_Latest.prproj", &token, date(4, 2))
+                .is_err());
+        }
+
+        #[test]
+        fn legacy_manifest_never_starts_missing_timer() {
+            let (_tmp, job, source, output) = fixture();
+            job.run_at(date(2, 1)).unwrap();
+            let path = job.destination.join(MANIFEST_NAME);
+            let mut manifest: Manifest = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            for record in manifest.values_mut() {
+                record.scope = None;
+            }
+            fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            fs::remove_file(source).unwrap();
+            job.run_at(date(2, 2)).unwrap();
+            let item = job.preview_at(date(7, 1)).unwrap().orphans.remove(0);
+            assert!(item.token.is_none());
+            assert!(item.missing_since.is_none());
+            assert!(output.exists());
+        }
+
+        #[test]
+        fn scan_error_does_not_start_missing_timer() {
+            let (_tmp, job, source, output) = fixture();
+            job.run_at(date(2, 1)).unwrap();
+            fs::remove_file(source).unwrap();
+            // A dangling directory link must not be treated as an empty subtree.
+            let link = job.source.join("unavailable");
+            #[cfg(windows)]
+            let linked = std::os::windows::fs::symlink_dir(job.source.join("missing"), &link);
+            #[cfg(unix)]
+            let linked = std::os::unix::fs::symlink(job.source.join("missing"), &link);
+            if linked.is_err() {
+                return;
+            } // Windows may lack symlink privilege.
+            let before = fs::read(job.destination.join(MANIFEST_NAME)).unwrap();
+            assert!(job.run_at(date(2, 2)).unwrap().summary.errors > 0);
+            assert_eq!(
+                before,
+                fs::read(job.destination.join(MANIFEST_NAME)).unwrap()
+            );
+            assert!(output.exists());
+        }
+
+        #[test]
+        fn partial_backup_failure_does_not_start_missing_timer() {
+            let (_tmp, job, source, output) = fixture();
+            job.run_at(date(2, 1)).unwrap();
+            fs::remove_file(source).unwrap();
+            let another = job.source.join("260101(1)_Project/another.prproj");
+            touch(&another);
+            fs::File::options()
+                .write(true)
+                .open(&another)
+                .unwrap()
+                .set_modified(date(2, 2).into())
+                .unwrap();
+            fs::create_dir(job.destination.join(format!("another{BACKUP_SUFFIX}"))).unwrap();
+            let outcome = job.run_at(date(2, 2)).unwrap();
+            assert!(outcome.summary.errors > 0);
+            let manifest: Manifest =
+                serde_json::from_slice(&fs::read(job.destination.join(MANIFEST_NAME)).unwrap())
+                    .unwrap();
+            assert!(manifest.values().all(|r| r.missing_since.is_none()));
+            assert!(output.exists());
         }
 
         #[test]

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Local};
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
@@ -65,6 +65,9 @@ pub async fn update_config(
     let logger = state.logger.clone();
     let service_error = state.service_error.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _guard = crate::backup::BACKUP_IO
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let result = store.update_preferences(
             config,
             || app.autolaunch().is_enabled().map_err(err_to_string),
@@ -97,6 +100,44 @@ pub async fn preview_deletions(state: State<'_, AppState>) -> Result<DeletionPre
             .with_excluded_folder_names(cfg.excluded_folder_names)
             .preview_deletions()
             .map_err(err_to_string)
+    })
+    .await
+    .map_err(err_to_string)?
+}
+
+#[tauri::command]
+pub async fn delete_orphan_backup(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    name: String,
+    token: String,
+) -> Result<(), String> {
+    let store = state.config_store.clone();
+    let logger = state.logger.clone();
+    let scheduler = state.scheduler.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = crate::backup::BACKUP_IO
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if scheduler.is_busy() {
+            return Err("バックアップ実行中です。完了後に再確認してください。".into());
+        }
+        let cfg = store.load().map_err(err_to_string)?;
+        cfg.validate().map_err(err_to_string)?;
+        let (Some(source), Some(destination)) = (cfg.source, cfg.destination) else {
+            return Err("監視元と出力先を設定してください。".into());
+        };
+        let result = BackupJob::new(source, destination)
+            .with_excluded_folders(cfg.excluded_folders)
+            .with_excluded_folder_names(cfg.excluded_folder_names)
+            .confirm_orphan_deletion(&name, &token)
+            .map_err(err_to_string);
+        match &result {
+            Ok(()) => logger.info(&format!("Confirmed orphan backup deletion: {name}")),
+            Err(e) => logger.error(&format!("Orphan backup deletion failed: {name}: {e}")),
+        }
+        let _ = app.emit("status-changed", ());
+        result
     })
     .await
     .map_err(err_to_string)?

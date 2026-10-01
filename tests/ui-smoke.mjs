@@ -21,7 +21,7 @@ try {
       config: cfg, status: { ...cfg, running: false, serviceError: null, nextRunAt: '2026-10-01T09:00:00+09:00' },
       preview: { checkedAt: '2026-09-30T12:00:00+09:00', candidates: ['G:/My Drive/Backup/old_Latest.prproj'], retained: ['G:/My Drive/Backup/legacy_Latest.prproj'], errors: [] },
       failLogs: false, failConfig: false, failPicker: false, failOpen: false, failSave: false,
-      listenDelay: 0, previewDelay: 0, saveDelay: 0, statusQueue: [], runCount: 0, saved: 0,
+      listenDelay: 0, previewDelay: 0, saveDelay: 0, statusQueue: [], runCount: 0, saved: 0, deleted: 0, failDelete: false,
       listeners: event => [...events.values()].filter(e => e.event === event).length,
       emit(event, payload) { for (const [eventId, entry] of events) if (entry.event === event) callbacks.get(entry.handler)?.({ event, id: eventId, payload }); },
     };
@@ -41,6 +41,7 @@ try {
         if (command === 'get_config') { if (mock.failConfig) throw 'config unreadable'; return clone(mock.config); }
         if (command === 'update_config') { await delay(mock.saveDelay); if (mock.failSave) throw '設定は保存していません: OS error'; mock.config = clone(args.config); mock.saved++; return; }
         if (command === 'preview_deletions') { await delay(mock.previewDelay); return clone(mock.preview); }
+        if (command === 'delete_orphan_backup') { if (mock.failDelete) throw '削除条件が変わりました'; mock.deleted++; mock.preview.orphans = []; return; }
         if (command === 'run_now') { mock.runCount++; return true; }
         if (command === 'list_recent_logs') { if (mock.failLogs) throw 'log read failed'; return ['[2026-09-30] [INFO] text containing [ERROR]', '[2026-09-30] [ERROR] real error']; }
         if (command === 'pick_folder') { if (mock.failPicker) throw 'picker failed'; return 'C:/Selected'; }
@@ -63,6 +64,30 @@ try {
   await page.getByText('一覧は完全ではありません。', { exact: false }).waitFor();
   assert.equal(await page.getByText('現在、削除予定のバックアップはありません。').count(), 0);
   console.log('PASS preview is read-only; partial errors are not presented as empty success');
+
+  await page.evaluate(() => {
+    window.__test.preview.errors = [];
+    window.__test.preview.orphans = [{ name: 'missing_Latest.prproj', backup: 'G:/Backup/missing_Latest.prproj', source: 'C:/Projects/missing.prproj', missingSince: '2026-07-31T12:00:00+09:00', eligibleAt: '2026-09-30T12:00:00+09:00', reason: '2ヶ月保留済み：確認して削除できます', token: 'test-token' }];
+  });
+  await page.getByRole('button', { name: '削除予定を確認', exact: true }).click();
+  await page.getByRole('button', { name: 'このバックアップの削除を確認' }).click();
+  const confirmDelete = page.getByRole('button', { name: '確認した1件を削除', exact: true });
+  assert(await confirmDelete.isDisabled());
+  await page.getByRole('button', { name: 'キャンセル', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__test.deleted), 0);
+  await page.getByRole('button', { name: 'このバックアップの削除を確認' }).click();
+  await page.getByRole('checkbox', { name: '内容を確認し、このバックアップの削除に同意します' }).check();
+  await page.evaluate(() => { window.__test.failDelete = true; });
+  await confirmDelete.click();
+  await page.getByRole('status').filter({ hasText: '削除条件が変わりました' }).waitFor();
+  assert.equal(await page.evaluate(() => window.__test.deleted), 0);
+  await page.evaluate(() => { window.__test.failDelete = false; });
+  await page.getByRole('button', { name: 'このバックアップの削除を確認' }).click();
+  await page.getByRole('checkbox', { name: '内容を確認し、このバックアップの削除に同意します' }).check();
+  await confirmDelete.click();
+  await page.getByRole('status').filter({ hasText: '削除しました' }).waitFor();
+  assert.equal(await page.evaluate(() => window.__test.deleted), 1);
+  console.log('PASS orphan deletion requires acknowledgement, supports cancel, and reports stale-state rejection');
 
   await page.evaluate(() => { window.__test.failLogs = true; });
   await nav('ログ').click();

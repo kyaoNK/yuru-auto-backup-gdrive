@@ -1,6 +1,6 @@
 [package]
 name = "yuru-auto-backup-gdrive"
-version = "0.2.0"
+version = "0.3.0"
 description = "Daily automatic backup of Premiere Pro project files to a Google Drive-synced folder."
 authors = ["kyaoNK"]
 edition = "2021"

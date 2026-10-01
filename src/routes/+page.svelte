@@ -4,7 +4,7 @@
   import { api } from "$lib/api";
   import { createAsyncScope } from "$lib/async-scope";
   import { formatDateTime } from "$lib/format";
-  import type { DeletionPreview, JobSummary, Status } from "$lib/types";
+  import type { DeletionPreview, JobSummary, Status, OrphanBackup } from "$lib/types";
 
   const scope = createAsyncScope();
   let status = $state<Status | null>(null);
@@ -15,8 +15,13 @@
   let preview = $state<DeletionPreview | null>(null);
   let previewLoading = $state(false);
   let previewError = $state<string | null>(null);
+  let confirming = $state<OrphanBackup | null>(null);
+  let acknowledged = $state(false);
+  let deleting = $state(false);
 
   function invalidatePreview() {
+    confirming = null;
+    acknowledged = false;
     scope.ticket("preview");
     if (preview || previewLoading) previewError = "状態が変わったため、削除予定を再確認してください。";
     preview = null;
@@ -36,7 +41,7 @@
   }
 
   async function handleRunNow() {
-    if (running) return;
+    if (running || deleting) return;
     invalidatePreview();
     running = true;
     try {
@@ -50,7 +55,9 @@
   }
 
   async function handlePreview() {
-    if (previewLoading) return;
+    if (previewLoading || deleting) return;
+    confirming = null;
+    acknowledged = false;
     const current = scope.ticket("preview");
     previewLoading = true;
     preview = null;
@@ -62,6 +69,25 @@
       if (current()) previewError = `削除予定を確認できませんでした: ${e}`;
     } finally {
       if (current()) previewLoading = false;
+    }
+  }
+
+  async function handleDeleteOrphan() {
+    const item = confirming;
+    if (!item?.token || !acknowledged || deleting) return;
+    deleting = true;
+    previewError = null;
+    try {
+      await api.deleteOrphanBackup(item.name, item.token);
+      if (scope.active) toast = `削除しました：${item.name}`;
+    } catch (e) {
+      if (scope.active) toast = `削除できませんでした：${e}`;
+    } finally {
+      if (scope.active) {
+        deleting = false;
+        invalidatePreview();
+        await handlePreview();
+      }
     }
   }
 
@@ -162,14 +188,14 @@
       <button
         class="px-4 py-2 rounded-md bg-blue-600 text-white font-medium hover:bg-blue-700 disabled:opacity-50"
         onclick={handleRunNow}
-        disabled={running || status.running || !!refreshError || !status.source || !status.destination}
+        disabled={deleting || running || status.running || !!refreshError || !status.source || !status.destination}
       >
         {status.running ? "実行中…" : "今すぐ実行"}
       </button>
       <button
         class="min-h-11 px-4 py-2 rounded-md border border-slate-300 dark:border-slate-600 hover:bg-slate-100 dark:hover:bg-slate-700 disabled:opacity-50"
         onclick={handlePreview}
-        disabled={previewLoading || running || status.running || !!refreshError || !status.source || !status.destination}
+        disabled={deleting || previewLoading || running || status.running || !!refreshError || !status.source || !status.destination}
         aria-busy={previewLoading}
       >
         {previewLoading ? "削除予定を確認中…" : "削除予定を確認"}
@@ -182,6 +208,7 @@
       </a>
     </div>
     <p class="text-sm text-slate-600 dark:text-slate-300">確認だけではコピー・削除しません。定時／手動実行では期限切れの管理済みバックアップを自動削除し、Drive 側にも同期されます。</p>
+    <p class="text-sm text-slate-600 dark:text-slate-300">元ファイル不在のバックアップは自動削除しません。正常な実行で不在を確認してから2ヶ月保留し、その後も個別の確認が必要です。</p>
     {#if previewError}
       <p role="alert" class="break-words text-sm text-red-700 dark:text-red-300">{previewError}</p>
     {/if}
@@ -213,6 +240,36 @@
               {#each preview.retained as path}<li class="break-all">{path}</li>{/each}
             </ul>
           </details>
+        {/if}
+        {#if (preview.orphans ?? []).length > 0}
+          <section aria-label="元ファイル不在・保護対象" class="space-y-3 border-t border-slate-300 pt-4 dark:border-slate-600">
+            <h3 class="font-semibold">元ファイル不在・保護対象（自動削除しません）</h3>
+            <ul class="space-y-4 text-sm">
+              {#each preview.orphans as item}
+                <li class="space-y-1 break-all">
+                  <p>バックアップ：{item.backup}</p>
+                  <p>元の場所：{item.source}</p>
+                  <p>{item.reason}</p>
+                  {#if item.missingSince}<p>不在確認：{formatDateTime(item.missingSince)} ／ 保留期限：{formatDateTime(item.eligibleAt)}</p>{/if}
+                  {#if item.token}
+                    <button class="min-h-11 rounded border border-red-600 px-3 py-2 text-red-700 dark:text-red-300 disabled:opacity-50" disabled={deleting || running || status.running || preview.errors.length > 0} onclick={() => { confirming = item; acknowledged = false; }}>このバックアップの削除を確認</button>
+                  {/if}
+                </li>
+              {/each}
+            </ul>
+            {#if confirming}
+              <section aria-label="バックアップ削除の最終確認" class="space-y-3 rounded border border-red-500 p-3">
+                <h4 class="font-semibold">本当にこの1件を削除しますか？</h4>
+                <p class="break-all text-sm">{confirming.backup}</p>
+                <p class="text-sm">監視範囲外への移動・改名と削除は区別できません。最後のコピーを失う可能性があり、Google Drive にも削除が同期されます。元ファイルの移動先や別のコピーを確認してください。</p>
+                <label class="flex min-h-11 items-center gap-2 text-sm"><input type="checkbox" bind:checked={acknowledged} disabled={deleting} />内容を確認し、このバックアップの削除に同意します</label>
+                <div class="flex flex-wrap gap-3">
+                  <button class="min-h-11 rounded border px-3 py-2" disabled={deleting} onclick={() => { confirming = null; acknowledged = false; }}>キャンセル</button>
+                  <button class="min-h-11 rounded bg-red-700 px-3 py-2 text-white disabled:opacity-50" disabled={!acknowledged || deleting} onclick={handleDeleteOrphan}>{deleting ? "再確認・削除中…" : "確認した1件を削除"}</button>
+                </div>
+              </section>
+            {/if}
+          </section>
         {/if}
       </section>
     {/if}

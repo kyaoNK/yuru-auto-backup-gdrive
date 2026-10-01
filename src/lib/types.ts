@@ -13,6 +13,17 @@ export interface DeletionPreview {
   candidates: string[];
   retained: string[];
   errors: [string, string][];
+  orphans: OrphanBackup[];
+}
+
+export interface OrphanBackup {
+  name: string;
+  backup: string;
+  source: string;
+  missingSince: string | null;
+  eligibleAt: string | null;
+  reason: string;
+  token: string | null;
 }
 
 export interface Config {

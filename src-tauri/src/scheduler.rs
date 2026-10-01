@@ -433,6 +433,13 @@ fn run_job_with_waiter(
             for (f, err) in &outcome.errored_files {
                 logger.warn(&format!("  error: {} — {}", f.display(), err));
             }
+            for item in &outcome.orphans {
+                logger.info(&format!(
+                    "  retained orphan/protected backup: {} — {}",
+                    item.backup.display(),
+                    item.reason
+                ));
+            }
             if let Err(err) = store.update(|updated| {
                 updated.last_run_at = Some(Local::now());
                 updated.last_summary = Some(outcome.summary);
